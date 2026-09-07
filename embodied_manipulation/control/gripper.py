@@ -1,6 +1,6 @@
 """Deterministic position control for the Panda parallel gripper."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from time import sleep
@@ -18,7 +18,7 @@ from embodied_manipulation.simulation.robot import (
 class GripperResult:
     """Measured outcome of one gripper command.
 
-    Opening widths are the sum of the two symmetric finger-joint positions.
+    Opening widths are the sum of the two finger-joint positions.
     ``target_finger_positions`` and ``final_finger_positions`` are the two
     individual prismatic-joint positions.
     """
@@ -36,7 +36,7 @@ class GripperResult:
 
 
 class PandaGripper:
-    """Control the two loaded Panda finger joints symmetrically."""
+    """Control the two loaded Panda parallel finger joints."""
 
     def __init__(self, client_id: int, robot_id: int) -> None:
         validate_franka_model(client_id, robot_id)
@@ -70,7 +70,8 @@ class PandaGripper:
         ):
             raise RuntimeError("Loaded Panda finger limits or efforts are invalid")
 
-        self._target_opening_width = self.opening_width()
+        self._target_finger_positions = self.finger_joint_positions()
+        self._target_opening_width = sum(self._target_finger_positions)
 
     def finger_joint_positions(self) -> tuple[float, float]:
         """Return the two individual finger-joint positions in metres."""
@@ -92,6 +93,7 @@ class PandaGripper:
         tolerance: float = 5e-4,
         max_steps: int = 240,
         step_delay: float = 0.0,
+        step_observer: Callable[[], None] | None = None,
     ) -> GripperResult:
         """Open to a total width, defaulting to the loaded-model maximum."""
         target = self.maximum_opening_width if opening_width is None else opening_width
@@ -101,6 +103,7 @@ class PandaGripper:
             max_steps=max_steps,
             step_delay=step_delay,
             allow_stall=False,
+            step_observer=step_observer,
         )
 
     def close(
@@ -110,6 +113,7 @@ class PandaGripper:
         tolerance: float = 5e-4,
         max_steps: int = 240,
         step_delay: float = 0.0,
+        step_observer: Callable[[], None] | None = None,
     ) -> GripperResult:
         """Close toward a total width, defaulting to fully closed.
 
@@ -124,15 +128,37 @@ class PandaGripper:
             max_steps=max_steps,
             step_delay=step_delay,
             allow_stall=True,
+            step_observer=step_observer,
         )
+
+    def capture_hold(self, *, inward_preload: float = 0.001) -> tuple[float, float]:
+        """Hold the measured finger configuration with a small inward preload."""
+        _nonnegative_finite(inward_preload, "inward_preload")
+        positions = self.finger_joint_positions()
+        targets = tuple(
+            max(lower, position - inward_preload)
+            for position, lower in zip(
+                positions,
+                self.finger_lower_limits,
+                strict=True,
+            )
+        )
+        self._target_finger_positions = targets
+        self._target_opening_width = sum(targets)
+        self._command(targets)
+        return targets
+
+    def maintain(self) -> None:
+        """Reissue the active physical finger POSITION_CONTROL command."""
+        self._command(self._target_finger_positions)
 
     def hold(self, *, steps: int = 1, step_delay: float = 0.0) -> GripperResult:
         """Keep the last open/close motor target active for a fixed duration."""
         _positive_integer(steps, "steps")
         _nonnegative_finite(step_delay, "step_delay")
-        targets = self._symmetric_targets(self._target_opening_width)
+        targets = self._target_finger_positions
         for _ in range(steps):
-            self._command(targets)
+            self.maintain()
             pybullet.stepSimulation(physicsClientId=self.client_id)
             if step_delay > 0.0:
                 sleep(step_delay)
@@ -155,6 +181,7 @@ class PandaGripper:
         max_steps: int,
         step_delay: float,
         allow_stall: bool,
+        step_observer: Callable[[], None] | None,
     ) -> GripperResult:
         target_width = _finite(opening_width, "opening_width")
         if not self.minimum_opening_width <= target_width <= self.maximum_opening_width:
@@ -166,14 +193,19 @@ class PandaGripper:
         _positive_finite(tolerance, "tolerance")
         _positive_integer(max_steps, "max_steps")
         _nonnegative_finite(step_delay, "step_delay")
+        if step_observer is not None and not callable(step_observer):
+            raise ValueError("step_observer must be callable")
 
         targets = self._symmetric_targets(target_width)
         self._target_opening_width = target_width
+        self._target_finger_positions = targets
         previous_width = self.opening_width()
         stalled_steps = 0
         for step in range(1, max_steps + 1):
             self._command(targets)
             pybullet.stepSimulation(physicsClientId=self.client_id)
+            if step_observer is not None:
+                step_observer()
             if step_delay > 0.0:
                 sleep(step_delay)
 

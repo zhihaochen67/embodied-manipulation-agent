@@ -1,8 +1,8 @@
 # Embodied Manipulation Agent
 
-A simulation-based vision-language-conditioned robotic manipulation agent with task planning, closed-loop execution, verification, and failure recovery.
+A deterministic PyBullet project for incrementally building robotic manipulation capabilities.
 
-**Status:** Early development — Phase 3. The repository currently provides a deterministic PyBullet scene, inverse-kinematics reach motion, and an oracle top-down cube pick for the Franka Panda. Placement, perception, language conditioning, and recovery are not implemented.
+**Status:** Early development — Phase 4. The repository currently provides a deterministic PyBullet scene, inverse-kinematics reach motion, and oracle cube pick-and-place for the Franka Panda. Perception, language conditioning, verification/recovery architecture, and learned policies are not implemented.
 
 ## Setup
 
@@ -19,6 +19,7 @@ With a working graphical display:
 python -m embodied_manipulation.simulation.demo
 python -m embodied_manipulation.control.demo
 python -m embodied_manipulation.control.pick_demo
+python -m embodied_manipulation.control.pick_place_demo
 ```
 
 ## Tests

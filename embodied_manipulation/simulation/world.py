@@ -1,4 +1,4 @@
-"""Minimal deterministic PyBullet world for Phase 1."""
+"""Minimal deterministic PyBullet world for the current manipulation phases."""
 
 from dataclasses import dataclass
 
@@ -7,23 +7,32 @@ import pybullet
 import pybullet_data
 
 from .camera import FixedCamera
-from .objects import CUBE_HALF_EXTENT, GROUND_Z, TABLE_SURFACE_Z, create_cube, create_table
+from .objects import (
+    CUBE_HALF_EXTENT,
+    GROUND_Z,
+    TABLE_SURFACE_Z,
+    Tray,
+    create_cube,
+    create_table,
+    create_tray,
+)
 from .robot import load_franka
 
 
 @dataclass(frozen=True, slots=True)
 class SceneState:
-    """Body IDs and initial cube position for the current scene."""
+    """Body IDs and minimal geometry for the current scene."""
 
     plane_id: int
     table_id: int
     robot_id: int
     cube_id: int
     cube_initial_position: tuple[float, float, float]
+    tray: Tray | None = None
 
 
 class World:
-    """Own a PyBullet client and assemble the minimal Phase 1 scene."""
+    """Own a PyBullet client and assemble the deterministic tabletop scene."""
 
     def __init__(self, gui: bool = False, time_step: float = 1.0 / 240.0) -> None:
         self.gui = gui
@@ -40,7 +49,7 @@ class World:
     def is_connected(self) -> bool:
         return bool(pybullet.isConnected(self.client_id))
 
-    def reset(self, seed: int = 0) -> SceneState:
+    def reset(self, seed: int = 0, *, include_tray: bool = False) -> SceneState:
         """Reset and deterministically assemble the minimal tabletop scene."""
         if not self.is_connected:
             raise RuntimeError("PyBullet client is disconnected")
@@ -74,6 +83,7 @@ class World:
             TABLE_SURFACE_Z + CUBE_HALF_EXTENT,
         )
         cube_id = create_cube(self.client_id, cube_position)
+        tray = create_tray(self.client_id) if include_tray else None
 
         self.scene = SceneState(
             plane_id=plane_id,
@@ -81,6 +91,7 @@ class World:
             robot_id=robot_id,
             cube_id=cube_id,
             cube_initial_position=cube_position,
+            tray=tray,
         )
         if self.gui:
             self.camera.configure_debug_view(self.client_id)
@@ -93,6 +104,19 @@ class World:
         scene = self._require_scene()
         position, orientation = pybullet.getBasePositionAndOrientation(
             scene.cube_id,
+            physicsClientId=self.client_id,
+        )
+        return tuple(position), tuple(orientation)
+
+    def get_tray_pose(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """Return the tray floor body's current world pose."""
+        scene = self._require_scene()
+        if scene.tray is None:
+            raise RuntimeError("Current scene does not include a tray")
+        position, orientation = pybullet.getBasePositionAndOrientation(
+            scene.tray.floor_id,
             physicsClientId=self.client_id,
         )
         return tuple(position), tuple(orientation)

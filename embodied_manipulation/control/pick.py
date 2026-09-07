@@ -1,5 +1,6 @@
 """Fixed oracle top-down pick for the deterministic Phase 3 scene."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import dist, hypot, isfinite
 from time import sleep
@@ -329,6 +330,8 @@ def _move_through_waypoints(
     position_tolerance: float,
     max_steps: int,
     step_delay: float,
+    before_step: Callable[[], None] | None = None,
+    after_step: Callable[[], None] | None = None,
 ) -> tuple[tuple[ReachResult, ...], tuple[tuple[float, float, float], ...]]:
     results: list[ReachResult] = []
     measured_positions = [arm.end_effector_pose()[0]]
@@ -339,6 +342,8 @@ def _move_through_waypoints(
             position_tolerance=position_tolerance,
             max_steps=max_steps,
             step_delay=step_delay,
+            before_step=before_step,
+            after_step=after_step,
         )
         results.append(result)
         measured_positions.append(result.final_position)

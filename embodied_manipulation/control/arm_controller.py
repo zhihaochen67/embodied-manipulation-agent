@@ -1,6 +1,6 @@
 """Continuous joint-space execution for Panda end-effector reaches."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import dist, isfinite
 from time import sleep
@@ -67,6 +67,8 @@ class ArmController:
         joint_tolerance: float = 0.02,
         max_steps: int = 480,
         step_delay: float = 0.0,
+        before_step: Callable[[], None] | None = None,
+        after_step: Callable[[], None] | None = None,
     ) -> ReachResult:
         """Reach a pose through bounded joint targets and simulation steps."""
         target = _position(target_position)
@@ -77,6 +79,10 @@ class ArmController:
             raise ValueError("step_delay must be nonnegative and finite")
         if not isinstance(max_steps, int) or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
+        if before_step is not None and not callable(before_step):
+            raise ValueError("before_step must be callable")
+        if after_step is not None and not callable(after_step):
+            raise ValueError("after_step must be callable")
 
         try:
             joint_targets = solve_inverse_kinematics(
@@ -109,7 +115,11 @@ class ArmController:
                 forces=self._joint_forces,
                 physicsClientId=self.client_id,
             )
+            if before_step is not None:
+                before_step()
             pybullet.stepSimulation(physicsClientId=self.client_id)
+            if after_step is not None:
+                after_step()
             if step_delay > 0.0:
                 sleep(step_delay)
 
