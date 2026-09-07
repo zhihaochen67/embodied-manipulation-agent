@@ -1,26 +1,29 @@
-"""Structured task semantics for generated manipulation scenarios."""
+"""Structured task semantics for manipulation instructions and scenarios."""
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
-    """Semantic reference to one uniquely identified scenario object."""
+    """Semantic object reference, optionally grounded to a logical object ID."""
 
-    object_id: str
+    object_id: str | None
     object_type: str
     color: str
 
     def __post_init__(self) -> None:
+        if self.object_id is not None and (
+            not isinstance(self.object_id, str) or not self.object_id
+        ):
+            raise ValueError("object_id must be None or a nonempty string")
         for value, name in (
-            (self.object_id, "object_id"),
             (self.object_type, "object_type"),
             (self.color, "color"),
         ):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a nonempty string")
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | None]:
         return {
             "object_id": self.object_id,
             "type": self.object_type,
@@ -34,7 +37,7 @@ class Task:
 
     action: str
     source: ObjectRef
-    target: ObjectRef
+    target: ObjectRef | None
     instruction: str
 
     def __post_init__(self) -> None:
@@ -42,13 +45,17 @@ class Task:
             raise ValueError("action must be a nonempty string")
         if not isinstance(self.instruction, str) or not self.instruction:
             raise ValueError("instruction must be a nonempty string")
-        if self.source.object_id == self.target.object_id:
+        if (
+            self.target is not None
+            and self.source.object_id is not None
+            and self.source.object_id == self.target.object_id
+        ):
             raise ValueError("source and target must have different object IDs")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "action": self.action,
             "source": self.source.to_dict(),
-            "target": self.target.to_dict(),
+            "target": self.target.to_dict() if self.target is not None else None,
             "instruction": self.instruction,
         }

@@ -14,7 +14,7 @@ from embodied_manipulation.benchmark.scenarios import (
     validate_scenario,
 )
 from embodied_manipulation.control.pick_place import oracle_pick_place
-from embodied_manipulation.language import ObjectRef, Task
+from embodied_manipulation.language import ObjectRef, Task, parse_instruction
 from embodied_manipulation.simulation import World
 from embodied_manipulation.simulation.objects import TABLE_SURFACE_Z
 
@@ -101,6 +101,22 @@ def test_instruction_agrees_with_structured_task() -> None:
         assert task.instruction in expected_instructions
         assert task.source.object_id == scenario.source.object_id
         assert task.target.object_id == scenario.target.object_id
+
+
+def test_generated_instructions_round_trip_to_matching_semantics() -> None:
+    for seed in range(21):
+        original = generate_scenario(seed).task
+        parsed = parse_instruction(original.instruction)
+
+        assert parsed.action == original.action
+        assert parsed.source.object_type == original.source.object_type
+        assert parsed.source.color == original.source.color
+        assert parsed.target is not None
+        assert original.target is not None
+        assert parsed.target.object_type == original.target.object_type
+        assert parsed.target.color == original.target.color
+        assert parsed.source.object_id is None
+        assert parsed.target.object_id is None
 
 
 def test_scenario_serialization_is_deterministic_and_json_compatible() -> None:
