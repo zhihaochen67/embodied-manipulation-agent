@@ -9,9 +9,6 @@ from .pick_place import oracle_pick_place
 GUI_INITIAL_PAUSE = 1.0
 GUI_STAGE_PAUSE = 0.35
 GUI_STEP_DELAY = 1.0 / 240.0
-GUI_PRE_RELEASE_PAUSE = 0.55
-GUI_RELEASE_STEP_DELAY = 1.0 / 60.0
-GUI_SLOW_RELEASE_SETTLING_STEPS = 30
 
 
 def main() -> None:
@@ -23,9 +20,6 @@ def main() -> None:
                 world,
                 step_delay=GUI_STEP_DELAY,
                 stage_pause=GUI_STAGE_PAUSE,
-                pre_release_pause=GUI_PRE_RELEASE_PAUSE,
-                release_step_delay=GUI_RELEASE_STEP_DELAY,
-                slow_release_settling_steps=GUI_SLOW_RELEASE_SETTLING_STEPS,
             )
 
             linear_speed = sum(
@@ -56,18 +50,6 @@ def main() -> None:
             print(
                 "observed vertical fall distance: "
                 f"{result.observed_vertical_fall_distance}"
-            )
-            release_open_steps = (
-                0 if result.release_result is None else result.release_result.steps
-            )
-            print(f"normal GUI step delay: {GUI_STEP_DELAY:.6f} s")
-            print(f"release GUI step delay: {GUI_RELEASE_STEP_DELAY:.6f} s")
-            print(f"pre-release pause: {GUI_PRE_RELEASE_PAUSE:.2f} s")
-            print(
-                "slow-motion release steps: "
-                f"{release_open_steps + GUI_SLOW_RELEASE_SETTLING_STEPS} "
-                f"({release_open_steps} opening + "
-                f"{GUI_SLOW_RELEASE_SETTLING_STEPS} settling)"
             )
             print(f"final cube position: {result.final_cube_position}")
             print(

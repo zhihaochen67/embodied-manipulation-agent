@@ -113,9 +113,6 @@ def oracle_pick_place(
     post_retreat_steps: int = POST_RETREAT_STEPS,
     step_delay: float = 0.0,
     stage_pause: float = 0.0,
-    pre_release_pause: float = 0.0,
-    release_step_delay: float | None = None,
-    slow_release_settling_steps: int = 0,
 ) -> PickPlaceResult:
     """Pick the cube, transport it over the tray, release, settle, and retreat."""
     if world.scene is None:
@@ -130,26 +127,12 @@ def oracle_pick_place(
     ):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
-    if (
-        not isinstance(slow_release_settling_steps, int)
-        or isinstance(slow_release_settling_steps, bool)
-        or slow_release_settling_steps < 0
-    ):
-        raise ValueError("slow_release_settling_steps must be a nonnegative integer")
     for value, name in (
         (step_delay, "step_delay"),
         (stage_pause, "stage_pause"),
-        (pre_release_pause, "pre_release_pause"),
     ):
         if not isfinite(value) or value < 0.0:
             raise ValueError(f"{name} must be nonnegative and finite")
-    if release_step_delay is not None and (
-        not isfinite(release_step_delay) or release_step_delay < 0.0
-    ):
-        raise ValueError("release_step_delay must be nonnegative and finite")
-    active_release_step_delay = (
-        step_delay if release_step_delay is None else release_step_delay
-    )
 
     scene = world.scene
     tray = scene.tray
@@ -465,9 +448,8 @@ def oracle_pick_place(
         }
         release_samples.append((cube_position, contacts))
 
-    _pause(pre_release_pause)
     release_result = gripper.open(
-        step_delay=active_release_step_delay,
+        step_delay=step_delay,
         step_observer=record_release_state,
     )
     if not release_result.success:
@@ -491,16 +473,7 @@ def oracle_pick_place(
         ][0]
     _pause(stage_pause)
 
-    slow_settling_steps = min(
-        slow_release_settling_steps,
-        settling_steps,
-    )
-    _step_world(world, slow_settling_steps, active_release_step_delay)
-    _step_world(
-        world,
-        settling_steps - slow_settling_steps,
-        step_delay,
-    )
+    _step_world(world, settling_steps, step_delay)
     completed_settling_steps += settling_steps
 
     retreat_results, _ = _move_through_waypoints(
