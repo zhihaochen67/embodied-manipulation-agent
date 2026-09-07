@@ -2,7 +2,7 @@
 
 A deterministic PyBullet project for incrementally building robotic manipulation capabilities.
 
-**Status:** Early development — Phase 6. The repository currently provides deterministic PyBullet scenes, structured task metadata, seeded scenario generation, oracle cube pick-and-place for the Franka Panda, and deterministic parsing for a bounded family of tabletop instructions. General language understanding, perception, benchmark execution, verification/recovery architecture, and learned policies are not implemented.
+**Status:** Early development — Phase 7. The repository currently provides deterministic PyBullet scenes, structured task metadata, seeded scenario generation, oracle cube pick-and-place for the Franka Panda, deterministic parsing for a bounded family of tabletop instructions, and color-based RGB-D localization of cubes and trays with image-to-world back-projection. General language understanding, learned or open-vocabulary vision, end-to-end agent execution, benchmark execution, and verification/recovery architecture are not implemented.
 
 ## Setup
 
