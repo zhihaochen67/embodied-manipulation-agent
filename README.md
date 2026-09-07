@@ -2,7 +2,7 @@
 
 A deterministic PyBullet project for incrementally building robotic manipulation capabilities.
 
-**Status:** Early development — Phase 4. The repository currently provides a deterministic PyBullet scene, inverse-kinematics reach motion, and oracle cube pick-and-place for the Franka Panda. Perception, language conditioning, verification/recovery architecture, and learned policies are not implemented.
+**Status:** Early development — Phase 5. The repository currently provides deterministic PyBullet scenes, structured task metadata, seeded scenario generation, and oracle cube pick-and-place for the Franka Panda. Language understanding, perception, benchmark execution, verification/recovery architecture, and learned policies are not implemented.
 
 ## Setup
 
