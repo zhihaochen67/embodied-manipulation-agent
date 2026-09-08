@@ -2,7 +2,7 @@
 
 A deterministic PyBullet project for incrementally building robotic manipulation capabilities.
 
-**Status:** Early development — Phase 7. The repository currently provides deterministic PyBullet scenes, structured task metadata, seeded scenario generation, oracle cube pick-and-place for the Franka Panda, deterministic parsing for a bounded family of tabletop instructions, and color-based RGB-D localization of cubes and trays with image-to-world back-projection. General language understanding, learned or open-vocabulary vision, end-to-end agent execution, benchmark execution, and verification/recovery architecture are not implemented.
+**Status:** Early development — Phase 8. The repository now includes a vision-conditioned open-loop manipulation agent that parses a bounded tabletop instruction, captures one RGB-D observation, grounds a cube and tray, plans fixed Cartesian manipulation targets, and physically executes pick-and-place with the Franka Panda. Execution does not re-observe, verify, retry, recover, or use a learned policy.
 
 ## Setup
 
@@ -20,6 +20,7 @@ python -m embodied_manipulation.simulation.demo
 python -m embodied_manipulation.control.demo
 python -m embodied_manipulation.control.pick_demo
 python -m embodied_manipulation.control.pick_place_demo
+python -m embodied_manipulation.agent.open_loop_demo
 ```
 
 ## Tests
