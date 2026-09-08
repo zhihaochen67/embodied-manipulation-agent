@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import radians, tan
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import cv2
 import numpy as np
@@ -39,6 +39,7 @@ HSV_THRESHOLDS: dict[str, tuple[tuple[int, int], ...]] = {
 MIN_SATURATION = 110
 MIN_VALUE = 35
 MIN_COMPONENT_AREA = 20
+DYNAMIC_CUBE_TOP_QUANTILE = 0.98
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,11 +297,24 @@ class VisionPerception:
         self._cube_size = float(cube_size)
         self._tray_floor_thickness = float(tray_floor_thickness)
 
-    def locate(self, object_ref: ObjectRef) -> LocalizationResult:
+    def locate(
+        self,
+        object_ref: ObjectRef,
+        *,
+        cube_center_mode: Literal["tabletop", "dynamic"] = "tabletop",
+    ) -> LocalizationResult:
+        """Locate an object from this observation.
+
+        The default tabletop cube reference preserves Phase 7 localization.
+        Dynamic mode reconstructs cube height from its visible RGB-D surface
+        when the cube may be lifted or resting in a tray.
+        """
         if object_ref.object_type not in {"cube", "tray"}:
             raise UnsupportedObjectError(
                 f"Unsupported object type: {object_ref.object_type}"
             )
+        if cube_center_mode not in {"tabletop", "dynamic"}:
+            raise ValueError("cube_center_mode must be 'tabletop' or 'dynamic'")
         mask = segment_color(self._observation.rgb, object_ref.color)
         components = self._components(mask)
         matches = [
@@ -323,7 +337,21 @@ class VisionPerception:
         maximum = np.max(component.world_points[:, :2], axis=0)
         center_xy = (minimum + maximum) / 2.0
         if object_ref.object_type == "cube":
-            center_z = TABLE_SURFACE_Z + self._cube_size / 2.0
+            if cube_center_mode == "tabletop":
+                center_z = TABLE_SURFACE_Z + self._cube_size / 2.0
+            else:
+                # The high visible surface is the cube top in the current
+                # top-down manipulation regime. A high quantile rejects sparse
+                # rasterization outliers while known cube geometry converts the
+                # surface height to a full 3-D center estimate. No body pose or
+                # renderer segmentation ID is consulted.
+                visible_top_z = float(
+                    np.quantile(
+                        component.world_points[:, 2],
+                        DYNAMIC_CUBE_TOP_QUANTILE,
+                    )
+                )
+                center_z = visible_top_z - self._cube_size / 2.0
             reference = "object_center"
         else:
             center_z = TABLE_SURFACE_Z + self._tray_floor_thickness / 2.0

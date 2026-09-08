@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
 from time import sleep
 
 import pybullet
 
-from embodied_manipulation.planning import ManipulationPlan
+from embodied_manipulation.planning import ManipulationPlan, Position
 from embodied_manipulation.simulation import World
 from embodied_manipulation.simulation.robot import PANDA_FINGER_JOINT_INDICES
 
@@ -24,6 +25,18 @@ from .pick import (
     _vertical_waypoints,
 )
 from .pick_place import POST_RETREAT_STEPS, SETTLING_STEPS
+
+
+@dataclass(frozen=True, slots=True)
+class StageGateResult:
+    """Whether a stage-level observer permits the fixed plan to continue."""
+
+    proceed: bool
+    reason: str
+
+
+GraspStageGate = Callable[[Position, bool], StageGateResult]
+PlacementStageGate = Callable[[Position], StageGateResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +70,8 @@ def execute_open_loop_plan(
     position_tolerance: float = PICK_POSITION_TOLERANCE,
     step_delay: float = 0.0,
     stage_pause: float = 0.0,
+    after_grasp: GraspStageGate | None = None,
+    after_placement: PlacementStageGate | None = None,
 ) -> OpenLoopExecutionResult:
     """Execute fixed targets without observing or measuring cube/tray poses.
 
@@ -70,6 +85,10 @@ def execute_open_loop_plan(
         raise RuntimeError("Open-loop pick-and-place requires a tray")
     if plan.task.action != "pick_and_place":
         raise ValueError("Open-loop executor requires a pick-and-place plan")
+    if after_grasp is not None and not callable(after_grasp):
+        raise ValueError("after_grasp must be callable")
+    if after_placement is not None and not callable(after_placement):
+        raise ValueError("after_placement must be callable")
     for value, name in (
         (arm_max_steps, "arm_max_steps"),
         (waypoint_count, "waypoint_count"),
@@ -192,7 +211,8 @@ def execute_open_loop_plan(
         step_delay=step_delay,
     )
     gripper_steps += hold_result.steps
-    if not _has_bilateral_contact(world):
+    initial_bilateral_contact = _has_bilateral_contact(world)
+    if not initial_bilateral_contact and after_grasp is None:
         return finish(False, "grasp", "Cube was not contacted by both fingers")
 
     transport_finger_targets = gripper.capture_hold()
@@ -212,9 +232,18 @@ def execute_open_loop_plan(
     _pause(stage_pause)
     if not lift_results[-1].success:
         return finish(False, "grasp", f"Lift failed: {lift_results[-1].failure_reason}")
-    if not _has_bilateral_contact(world):
+    bilateral_contact = _has_bilateral_contact(world)
+    grasp_success = bilateral_contact
+    if after_grasp is not None:
+        gate = after_grasp(arm.end_effector_pose()[0], bilateral_contact)
+        if not gate.proceed:
+            return finish(
+                False,
+                "grasp_verification",
+                gate.reason,
+            )
+    if not bilateral_contact:
         return finish(False, "grasp", "Cube contact was lost during lift")
-    grasp_success = True
 
     safe_results, _ = _move_through_waypoints(
         arm,
@@ -317,6 +346,14 @@ def execute_open_loop_plan(
     completed_settling_steps += post_retreat_steps
     _pause(stage_pause)
     placement_success = True
+    if after_placement is not None:
+        gate = after_placement(arm.end_effector_pose()[0])
+        if not gate.proceed:
+            return finish(
+                False,
+                "placement_verification",
+                gate.reason,
+            )
     return finish(True, None, None)
 
 
