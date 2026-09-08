@@ -33,3 +33,16 @@ python -m embodied_manipulation.agent.recovery_demo --failure placement
 ```bash
 python -m pytest -q
 ```
+
+## Smoke benchmark
+
+Run the sequential Phase 11A infrastructure check over seeds 0–11. Each seed
+uses `distractor_count = seed % 3` and each of the four methods receives a fresh
+world initialized from the same logical scenario:
+
+```bash
+python -m embodied_manipulation.benchmark.runner --start-seed 0 --episodes 12
+```
+
+Results are written under the ignored `outputs/benchmarks/` directory. This is
+a smoke protocol check, not the final project benchmark.

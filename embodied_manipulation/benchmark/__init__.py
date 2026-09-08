@@ -1,4 +1,6 @@
-"""Structured deterministic scenarios; batch benchmarking is deferred."""
+"""Deterministic scenarios and Phase 11A benchmark metrics."""
+
+from .metrics import BENCHMARK_VERSION, CSV_FIELDS, METHODS, EpisodeResult
 
 from .scenarios import (
     CubeSpec,
@@ -9,7 +11,11 @@ from .scenarios import (
 )
 
 __all__ = [
+    "BENCHMARK_VERSION",
+    "CSV_FIELDS",
     "CubeSpec",
+    "EpisodeResult",
+    "METHODS",
     "Scenario",
     "TraySpec",
     "generate_scenario",
