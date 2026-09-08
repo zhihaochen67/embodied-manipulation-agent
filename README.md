@@ -2,9 +2,9 @@
 
 A deterministic PyBullet project for incrementally building robotic manipulation capabilities.
 
-**Status:** Early development — Phase 9. The Phase 8 vision-conditioned open-loop agent remains an observe-once baseline.
+**Status:** Early development — Phase 10. The Phase 8 open-loop and Phase 9 verification-only agents remain unchanged baselines.
 
-The separate closed-loop agent uses fresh RGB-D observations after lift and after settled placement to verify grasp and tray containment. Verification can only continue or stop the immutable initial plan; it does not retry, recover, or replan.
+The verification-only agent uses fresh RGB-D observations after lift and settled placement. A separate recovery-enabled agent reuses a failed verification frame to visually re-ground the cube and tray, then retries the failed task once with a fresh deterministic plan.
 
 ## Setup
 
@@ -24,6 +24,8 @@ python -m embodied_manipulation.control.pick_demo
 python -m embodied_manipulation.control.pick_place_demo
 python -m embodied_manipulation.agent.open_loop_demo
 python -m embodied_manipulation.agent.closed_loop_demo
+python -m embodied_manipulation.agent.recovery_demo --failure grasp
+python -m embodied_manipulation.agent.recovery_demo --failure placement
 ```
 
 ## Tests
