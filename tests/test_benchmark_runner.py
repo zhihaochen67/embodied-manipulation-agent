@@ -96,6 +96,19 @@ def test_method_registry_and_csv_schema_are_stable() -> None:
     assert CSV_FIELDS[-2:] == ("wall_clock_seconds", "infrastructure_error")
 
 
+def test_benchmark_metadata_uses_tracked_version() -> None:
+    scenario = generate_scenario(0)
+    run = benchmark_runner.run_benchmark(
+        episodes=1,
+        methods=("oracle_scripted",),
+        save_outputs=False,
+        episode_runner=lambda method, _: _episode(method, scenario),
+    )
+
+    assert BENCHMARK_VERSION == "phase14a-clean-v2"
+    assert run.metadata["benchmark_version"] == BENCHMARK_VERSION
+
+
 def test_episode_result_is_json_serializable_and_oracle_metrics_are_na() -> None:
     episode = _episode("oracle_scripted", generate_scenario(0))
     encoded = json.dumps(episode.to_dict(), sort_keys=True)
