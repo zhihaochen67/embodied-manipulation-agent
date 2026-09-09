@@ -81,6 +81,23 @@ def test_clean_episode_keeps_phase9_schedule_without_recovery() -> None:
     assert result.recovery_execution_result is None
 
 
+def test_seed_89_clean_path_succeeds_without_recovery() -> None:
+    scenario = generate_scenario(89, distractor_count=2)
+    with World(gui=False) as world:
+        world.reset_from_scenario(scenario)
+        result = VisionRecoveryAgent().run(scenario.task.instruction, world)
+
+    assert result.success, result.failure_reason
+    assert not result.recovery_activated
+    assert result.recovery_attempts == 0
+    assert result.initial_execution_result is not None
+    assert result.initial_execution_result.close_result is not None
+    assert (
+        result.initial_execution_result.close_result.termination_reason
+        == "bilateral_target_contact"
+    )
+
+
 def test_controlled_grasp_miss_recovers_from_reused_visual_frame() -> None:
     scenario = generate_scenario(0)
     events: list[str] = []

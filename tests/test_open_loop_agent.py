@@ -7,6 +7,7 @@ from math import isfinite
 import pybullet
 import pytest
 
+import embodied_manipulation.control.open_loop as open_loop_module
 from embodied_manipulation.agent import VisionOpenLoopAgent
 from embodied_manipulation.benchmark import generate_scenario
 from embodied_manipulation.control.open_loop import (
@@ -255,6 +256,54 @@ def test_seed_zero_executes_full_vision_open_loop_reproducibly() -> None:
     assert first.execution_result is not None
     assert first.execution_result.constraint_count_before == 0
     assert first.execution_result.constraint_count_after == 0
+
+
+def test_seed_89_contact_supported_close_proceeds_through_normal_execution() -> None:
+    scenario = generate_scenario(89, distractor_count=2)
+    with World(gui=False) as world:
+        world.reset_from_scenario(scenario)
+        result = VisionOpenLoopAgent().run(scenario.task.instruction, world)
+
+    assert result.success, result.failure_reason
+    assert result.execution_result is not None
+    assert result.execution_result.close_result is not None
+    assert result.execution_result.close_result.success
+    assert result.execution_result.close_result.steps == 20
+    assert (
+        result.execution_result.close_result.termination_reason
+        == "bilateral_target_contact"
+    )
+    assert result.execution_result.grasp_success
+
+
+def test_close_completion_does_not_replace_post_close_grasp_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = generate_scenario(89, distractor_count=2)
+    with World(gui=False) as world:
+        world.reset_from_scenario(scenario)
+        observation = RGBDObservation.capture(world.camera, world.client_id)
+        perception = VisionPerception(observation)
+        task = parse_instruction(scenario.task.instruction)
+        source = perception.locate(task.source)
+        assert task.target is not None
+        target = perception.locate(task.target)
+        plan = TaskPlanner().plan(task, source, target)
+        monkeypatch.setattr(
+            open_loop_module,
+            "_has_bilateral_contact",
+            lambda _world: False,
+        )
+
+        result = execute_open_loop_plan(world, plan)
+
+    assert not result.success
+    assert not result.grasp_success
+    assert result.failure_stage == "grasp"
+    assert result.failure_reason == "Cube was not contacted by both fingers"
+    assert result.close_result is not None
+    assert result.close_result.success
+    assert result.close_result.termination_reason == "bilateral_target_contact"
 
 
 def test_impossible_perception_query_fails_cleanly() -> None:

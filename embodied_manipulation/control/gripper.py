@@ -14,6 +14,10 @@ from embodied_manipulation.simulation.robot import (
 )
 
 
+CLOSE_MINIMUM_COMPLETION_STEPS = 20
+CLOSE_CONSECUTIVE_COMPLETION_STEPS = 12
+
+
 @dataclass(frozen=True, slots=True)
 class GripperResult:
     """Measured outcome of one gripper command.
@@ -33,6 +37,7 @@ class GripperResult:
     reached_target: bool
     stalled: bool
     failure_reason: str | None = None
+    termination_reason: str | None = None
 
 
 class PandaGripper:
@@ -103,6 +108,7 @@ class PandaGripper:
             max_steps=max_steps,
             step_delay=step_delay,
             allow_stall=False,
+            target_body_id=None,
             step_observer=step_observer,
         )
 
@@ -110,6 +116,7 @@ class PandaGripper:
         self,
         opening_width: float | None = None,
         *,
+        target_body_id: int | None = None,
         tolerance: float = 5e-4,
         max_steps: int = 240,
         step_delay: float = 0.0,
@@ -119,7 +126,11 @@ class PandaGripper:
 
         Contact with an object can prevent the position target from being
         reached. A stable, low-velocity contact stall is therefore a normal
-        successful completion mode and the motor target remains active.
+        successful completion mode. When ``target_body_id`` is supplied,
+        sustained contact between that body and both finger links is also a
+        normal completion mode. Completion means post-close settling may
+        proceed; it does not establish physical grasp success. The motor target
+        remains active in every case.
         """
         target = self.minimum_opening_width if opening_width is None else opening_width
         return self._move(
@@ -128,6 +139,7 @@ class PandaGripper:
             max_steps=max_steps,
             step_delay=step_delay,
             allow_stall=True,
+            target_body_id=target_body_id,
             step_observer=step_observer,
         )
 
@@ -171,6 +183,7 @@ class PandaGripper:
             reached_target=False,
             stalled=False,
             failure_reason=None,
+            termination_reason="hold_complete",
         )
 
     def _move(
@@ -181,6 +194,7 @@ class PandaGripper:
         max_steps: int,
         step_delay: float,
         allow_stall: bool,
+        target_body_id: int | None,
         step_observer: Callable[[], None] | None,
     ) -> GripperResult:
         target_width = _finite(opening_width, "opening_width")
@@ -193,6 +207,7 @@ class PandaGripper:
         _positive_finite(tolerance, "tolerance")
         _positive_integer(max_steps, "max_steps")
         _nonnegative_finite(step_delay, "step_delay")
+        _optional_nonnegative_integer(target_body_id, "target_body_id")
         if step_observer is not None and not callable(step_observer):
             raise ValueError("step_observer must be callable")
 
@@ -201,6 +216,7 @@ class PandaGripper:
         self._target_finger_positions = targets
         previous_width = self.opening_width()
         stalled_steps = 0
+        bilateral_target_contact_steps = 0
         for step in range(1, max_steps + 1):
             self._command(targets)
             pybullet.stepSimulation(physicsClientId=self.client_id)
@@ -224,6 +240,7 @@ class PandaGripper:
                     reached_target=True,
                     stalled=False,
                     failure_reason=None,
+                    termination_reason="target_reached",
                 )
 
             states = pybullet.getJointStates(
@@ -244,7 +261,27 @@ class PandaGripper:
                 stalled_steps += 1
             else:
                 stalled_steps = 0
-            if allow_stall and step >= 20 and stalled_steps >= 12:
+            if (
+                allow_stall
+                and target_body_id is not None
+                and target_width < sum(positions)
+                and _has_bilateral_target_contact(
+                    self.client_id,
+                    self.robot_id,
+                    target_body_id,
+                )
+            ):
+                bilateral_target_contact_steps += 1
+            else:
+                bilateral_target_contact_steps = 0
+
+            # Completion precedence is deterministic: target position first,
+            # stable stall second, and sustained target contact third.
+            if (
+                allow_stall
+                and step >= CLOSE_MINIMUM_COMPLETION_STEPS
+                and stalled_steps >= CLOSE_CONSECUTIVE_COMPLETION_STEPS
+            ):
                 return self._result(
                     success=True,
                     steps=step,
@@ -254,6 +291,24 @@ class PandaGripper:
                     reached_target=False,
                     stalled=True,
                     failure_reason=None,
+                    termination_reason="stable_stall",
+                )
+            if (
+                allow_stall
+                and step >= CLOSE_MINIMUM_COMPLETION_STEPS
+                and bilateral_target_contact_steps
+                >= CLOSE_CONSECUTIVE_COMPLETION_STEPS
+            ):
+                return self._result(
+                    success=True,
+                    steps=step,
+                    target_opening_width=target_width,
+                    targets=targets,
+                    tolerance=tolerance,
+                    reached_target=False,
+                    stalled=False,
+                    failure_reason=None,
+                    termination_reason="bilateral_target_contact",
                 )
             previous_width = sum(positions)
 
@@ -266,6 +321,7 @@ class PandaGripper:
             reached_target=False,
             stalled=False,
             failure_reason=f"Timed out after {max_steps} simulation steps",
+            termination_reason="timeout",
         )
 
     def _symmetric_targets(self, opening_width: float) -> tuple[float, float]:
@@ -302,6 +358,7 @@ class PandaGripper:
         reached_target: bool,
         stalled: bool,
         failure_reason: str | None,
+        termination_reason: str,
     ) -> GripperResult:
         positions = self.finger_joint_positions()
         error = max(
@@ -319,7 +376,27 @@ class PandaGripper:
             reached_target=reached_target or error <= tolerance,
             stalled=stalled,
             failure_reason=failure_reason,
+            termination_reason=termination_reason,
         )
+
+
+def _has_bilateral_target_contact(
+    client_id: int,
+    robot_id: int,
+    target_body_id: int,
+) -> bool:
+    """Return whether both Panda finger links contact the intended body."""
+    contacts = pybullet.getContactPoints(
+        bodyA=robot_id,
+        bodyB=target_body_id,
+        physicsClientId=client_id,
+    )
+    finger_links = {
+        int(contact[3])
+        for contact in contacts
+        if int(contact[3]) in PANDA_FINGER_JOINT_INDICES
+    }
+    return finger_links == set(PANDA_FINGER_JOINT_INDICES)
 
 
 def _finite(value: float, name: str) -> float:
@@ -345,3 +422,10 @@ def _nonnegative_finite(value: float, name: str) -> None:
 def _positive_integer(value: int, name: str) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+
+
+def _optional_nonnegative_integer(value: int | None, name: str) -> None:
+    if value is not None and (
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+    ):
+        raise ValueError(f"{name} must be a nonnegative integer or None")

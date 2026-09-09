@@ -1,10 +1,15 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import pybullet
 import pytest
 
-from embodied_manipulation.control.gripper import PandaGripper
+from embodied_manipulation.control.gripper import (
+    CLOSE_CONSECUTIVE_COMPLETION_STEPS,
+    CLOSE_MINIMUM_COMPLETION_STEPS,
+    GripperResult,
+    PandaGripper,
+)
 from embodied_manipulation.control.pick import (
     CARTESIAN_WAYPOINT_COUNT,
     MAXIMUM_CUBE_TO_EE_DISTANCE,
@@ -27,6 +32,61 @@ def world() -> Iterator[World]:
         yield simulation
     finally:
         simulation.disconnect()
+
+
+def _controlled_close(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target_body_id: int,
+    contact_links: Callable[[int, int], tuple[int, ...]],
+    position_schedule: Callable[[int], tuple[float, float]] | None = None,
+    joint_velocity: float = 0.001,
+    opening_width: float | None = None,
+    max_steps: int = CLOSE_MINIMUM_COMPLETION_STEPS + 4,
+) -> GripperResult:
+    """Run close against deterministic low-level joint/contact signals."""
+    assert world.scene is not None
+    gripper = PandaGripper(world.client_id, world.scene.robot_id)
+    simulation_step = 0
+
+    def step_simulation(*_: object, **__: object) -> None:
+        nonlocal simulation_step
+        simulation_step += 1
+
+    def finger_positions() -> tuple[float, float]:
+        if position_schedule is not None:
+            return position_schedule(simulation_step)
+        if simulation_step == 0:
+            return 0.04, 0.04
+        return 0.03, 0.03
+
+    def get_contacts(*_: object, **kwargs: object) -> tuple[tuple[object, ...], ...]:
+        body_id = int(kwargs["bodyB"])
+        contacts = []
+        for link_index in contact_links(simulation_step, body_id):
+            contact = [0] * 10
+            contact[3] = link_index
+            contacts.append(tuple(contact))
+        return tuple(contacts)
+
+    monkeypatch.setattr(gripper, "_command", lambda _: None)
+    monkeypatch.setattr(gripper, "finger_joint_positions", finger_positions)
+    monkeypatch.setattr(pybullet, "stepSimulation", step_simulation)
+    monkeypatch.setattr(
+        pybullet,
+        "getJointStates",
+        lambda *_args, **_kwargs: (
+            (0.03, joint_velocity, 0.0, 0.0),
+            (0.03, joint_velocity, 0.0, 0.0),
+        ),
+    )
+    monkeypatch.setattr(pybullet, "getContactPoints", get_contacts)
+    return gripper.close(
+        opening_width,
+        target_body_id=target_body_id,
+        max_steps=max_steps,
+    )
 
 
 def test_gripper_metadata_and_limits_match_loaded_model(world: World) -> None:
@@ -92,11 +152,166 @@ def test_gripper_closes_deterministically_without_hanging(world: World) -> None:
     assert first.success and second.success
     assert first.steps <= 240 and second.steps <= 240
     assert first.reached_target and second.reached_target
+    assert first.termination_reason == second.termination_reason == "target_reached"
     np.testing.assert_allclose(
         first.final_finger_positions,
         second.final_finger_positions,
         atol=1e-8,
     )
+
+
+def test_sustained_bilateral_target_contact_completes_close(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    target_id = world.scene.cube_id
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=target_id,
+        contact_links=lambda _step, body_id: (
+            PANDA_FINGER_JOINT_INDICES if body_id == target_id else ()
+        ),
+    )
+
+    assert result.success
+    assert result.steps == CLOSE_MINIMUM_COMPLETION_STEPS
+    assert not result.reached_target
+    assert not result.stalled
+    assert result.termination_reason == "bilateral_target_contact"
+
+
+def test_unilateral_target_contact_cannot_complete_close(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    target_id = world.scene.cube_id
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=target_id,
+        contact_links=lambda _step, body_id: (
+            (PANDA_FINGER_JOINT_INDICES[0],) if body_id == target_id else ()
+        ),
+    )
+
+    assert not result.success
+    assert result.termination_reason == "timeout"
+
+
+def test_transient_bilateral_target_contact_cannot_complete_close(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    target_id = world.scene.cube_id
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=target_id,
+        contact_links=lambda step, body_id: (
+            PANDA_FINGER_JOINT_INDICES
+            if body_id == target_id
+            and step < CLOSE_CONSECUTIVE_COMPLETION_STEPS
+            else ()
+        ),
+    )
+
+    assert not result.success
+    assert result.termination_reason == "timeout"
+
+
+def test_bilateral_non_target_contact_cannot_complete_close(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    target_id = world.scene.cube_id
+    non_target_id = world.scene.table_id
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=target_id,
+        contact_links=lambda _step, body_id: (
+            PANDA_FINGER_JOINT_INDICES if body_id == non_target_id else ()
+        ),
+    )
+
+    assert not result.success
+    assert result.termination_reason == "timeout"
+
+
+def test_no_completion_evidence_still_times_out(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=world.scene.cube_id,
+        contact_links=lambda _step, _body_id: (),
+    )
+
+    assert not result.success
+    assert result.steps == CLOSE_MINIMUM_COMPLETION_STEPS + 4
+    assert result.failure_reason == "Timed out after 24 simulation steps"
+    assert result.termination_reason == "timeout"
+
+
+def test_stable_stall_precedes_bilateral_contact(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    target_id = world.scene.cube_id
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=target_id,
+        contact_links=lambda _step, body_id: (
+            PANDA_FINGER_JOINT_INDICES if body_id == target_id else ()
+        ),
+        joint_velocity=0.0,
+    )
+
+    assert result.success
+    assert result.steps == CLOSE_MINIMUM_COMPLETION_STEPS
+    assert result.stalled
+    assert result.termination_reason == "stable_stall"
+
+
+def test_target_position_precedes_bilateral_contact(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    target_id = world.scene.cube_id
+    result = _controlled_close(
+        world,
+        monkeypatch,
+        target_body_id=target_id,
+        contact_links=lambda _step, body_id: (
+            PANDA_FINGER_JOINT_INDICES if body_id == target_id else ()
+        ),
+        position_schedule=lambda step: (
+            (0.04, 0.04)
+            if step == 0
+            else (
+                (0.0, 0.0)
+                if step >= CLOSE_MINIMUM_COMPLETION_STEPS
+                else (0.03, 0.03)
+            )
+        ),
+    )
+
+    assert result.success
+    assert result.steps == CLOSE_MINIMUM_COMPLETION_STEPS
+    assert result.reached_target
+    assert not result.stalled
+    assert result.termination_reason == "target_reached"
 
 
 def test_oracle_pick_physically_lifts_and_holds_cube(world: World) -> None:
@@ -112,6 +327,7 @@ def test_oracle_pick_physically_lifts_and_holds_cube(world: World) -> None:
         PANDA_FINGER_JOINT_INDICES
     )
     assert result.close_result is not None and result.close_result.stalled
+    assert result.close_result.termination_reason == "stable_stall"
     assert result.constraint_count_before == 0
     assert result.constraint_count_after == result.constraint_count_before
 

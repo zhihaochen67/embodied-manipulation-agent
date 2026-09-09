@@ -14,7 +14,7 @@ from embodied_manipulation.simulation import World
 from embodied_manipulation.simulation.robot import PANDA_FINGER_JOINT_INDICES
 
 from .arm_controller import ArmController, ReachResult
-from .gripper import PandaGripper
+from .gripper import GripperResult, PandaGripper
 from .pick import (
     CARTESIAN_WAYPOINT_COUNT,
     CONTACT_SETTLE_STEPS,
@@ -54,6 +54,7 @@ class OpenLoopExecutionResult:
     constraint_count_before: int
     constraint_count_after: int
     transport_finger_targets: tuple[float, float] | None
+    close_result: GripperResult | None = None
     failure_stage: str | None = None
     failure_reason: str | None = None
 
@@ -121,6 +122,7 @@ def execute_open_loop_plan(
     transport_success = False
     placement_success = False
     transport_finger_targets: tuple[float, float] | None = None
+    close_result: GripperResult | None = None
 
     def finish(
         success: bool,
@@ -148,6 +150,7 @@ def execute_open_loop_plan(
             constraint_count_before=constraint_count_before,
             constraint_count_after=constraint_count_after,
             transport_finger_targets=transport_finger_targets,
+            close_result=close_result,
             failure_stage=failure_stage,
             failure_reason=failure_reason,
         )
@@ -198,7 +201,10 @@ def execute_open_loop_plan(
             f"Grasp approach failed: {approach_results[-1].failure_reason}",
         )
 
-    close_result = gripper.close(step_delay=step_delay)
+    close_result = gripper.close(
+        target_body_id=scene.cube_id,
+        step_delay=step_delay,
+    )
     gripper_steps += close_result.steps
     if not close_result.success:
         return finish(

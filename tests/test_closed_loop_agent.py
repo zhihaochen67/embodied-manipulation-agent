@@ -209,6 +209,23 @@ def test_successful_closed_loop_uses_three_observations_and_immutable_plan() -> 
     assert result.execution_result.constraint_count_after == 0
 
 
+def test_seed_89_closed_loop_visually_verifies_contact_supported_grasp() -> None:
+    scenario = generate_scenario(89, distractor_count=2)
+    with World(gui=False) as world:
+        world.reset_from_scenario(scenario)
+        result = VisionClosedLoopAgent().run(scenario.task.instruction, world)
+
+    assert result.success, result.failure_reason
+    assert result.grasp_verification is not None
+    assert result.grasp_verification.verified
+    assert result.execution_result is not None
+    assert result.execution_result.close_result is not None
+    assert (
+        result.execution_result.close_result.termination_reason
+        == "bilateral_target_contact"
+    )
+
+
 class _MissedGraspPlanner(TaskPlanner):
     calls = 0
 
