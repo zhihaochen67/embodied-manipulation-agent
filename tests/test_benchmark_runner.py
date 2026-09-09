@@ -113,7 +113,7 @@ def test_benchmark_metadata_uses_tracked_version() -> None:
         episode_runner=lambda method, _: _episode(method, scenario),
     )
 
-    assert BENCHMARK_VERSION == "phase14b-perturb-v1"
+    assert BENCHMARK_VERSION == "phase14d-perturb-v2"
     assert run.metadata["benchmark_version"] == BENCHMARK_VERSION
 
 
