@@ -113,6 +113,8 @@ def oracle_pick_place(
     post_retreat_steps: int = POST_RETREAT_STEPS,
     step_delay: float = 0.0,
     stage_pause: float = 0.0,
+    grasp_xy_offset: tuple[float, float] = (0.0, 0.0),
+    placement_xy_offset: tuple[float, float] = (0.0, 0.0),
 ) -> PickPlaceResult:
     """Pick the cube, transport it over the tray, release, settle, and retreat."""
     if world.scene is None:
@@ -133,6 +135,12 @@ def oracle_pick_place(
     ):
         if not isfinite(value) or value < 0.0:
             raise ValueError(f"{name} must be nonnegative and finite")
+    for offset, name in (
+        (grasp_xy_offset, "grasp_xy_offset"),
+        (placement_xy_offset, "placement_xy_offset"),
+    ):
+        if len(offset) != 2 or not all(isfinite(value) for value in offset):
+            raise ValueError(f"{name} must contain exactly two finite values")
 
     scene = world.scene
     tray = scene.tray
@@ -151,6 +159,7 @@ def oracle_pick_place(
         waypoint_count=waypoint_count,
         step_delay=step_delay,
         stage_pause=stage_pause,
+        grasp_xy_offset=grasp_xy_offset,
     )
 
     arm = ArmController(world.client_id, scene.robot_id)
@@ -189,8 +198,8 @@ def oracle_pick_place(
         for cube, ee in zip(final_cube_position, final_ee_position, strict=True)
     )
     expected_release_center = (
-        tray_center[0],
-        tray_center[1],
+        tray_center[0] + placement_xy_offset[0],
+        tray_center[1] + placement_xy_offset[1],
         tray_floor_height + CUBE_HALF_EXTENT + RELEASE_BOTTOM_CLEARANCE,
     )
     release_target = tuple(
@@ -212,8 +221,8 @@ def oracle_pick_place(
         transport_ee_z,
     )
     above_tray_target = (
-        tray_center[0] - cube_to_ee_offset[0],
-        tray_center[1] - cube_to_ee_offset[1],
+        expected_release_center[0] - cube_to_ee_offset[0],
+        expected_release_center[1] - cube_to_ee_offset[1],
         transport_ee_z,
     )
     transport_targets = (safe_transport_target, above_tray_target)

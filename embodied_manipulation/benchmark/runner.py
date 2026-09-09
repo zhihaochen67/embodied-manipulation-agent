@@ -1,4 +1,4 @@
-"""Sequential, reproducible Phase 11A four-method benchmark runner."""
+"""Sequential, reproducible clean and Phase 14B perturbation benchmark runner."""
 
 from __future__ import annotations
 
@@ -32,6 +32,12 @@ from .metrics import (
     EpisodeResult,
     summarize_episodes,
 )
+from .perturbations import (
+    PERTURBATION_NAMES,
+    BenchmarkPerturbation,
+    FirstAttemptPerturbingPlanner,
+    ordered_perturbations,
+)
 from .scenarios import Scenario, generate_scenario
 
 DEFAULT_START_SEED = 0
@@ -41,7 +47,7 @@ DEFAULT_OUTPUT_ROOT = Path("outputs/benchmarks")
 
 WorldFactory = Callable[[], Any]
 MethodRunner = Callable[[str, Scenario, Any], Any]
-EpisodeRunner = Callable[[str, Scenario], EpisodeResult]
+EpisodeRunner = Callable[..., EpisodeResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +56,10 @@ class BenchmarkRun:
 
     episodes: tuple[EpisodeResult, ...]
     summary: Mapping[str, Mapping[str, int | float | None]]
+    perturbation_summary: Mapping[
+        str,
+        Mapping[str, Mapping[str, int | float | None]],
+    ]
     metadata: Mapping[str, Any]
     output_dir: Path | None = None
 
@@ -62,6 +72,7 @@ def run_episode(
     method_runner: MethodRunner | None = None,
     objective_evaluator: Callable[[Any], PlacementEvaluation] = evaluate_placement,
     clock: Callable[[], float] = perf_counter,
+    perturbation: BenchmarkPerturbation | None = None,
 ) -> EpisodeResult:
     """Run one method in a fresh world and normalize its result.
 
@@ -71,18 +82,28 @@ def run_episode(
     if method not in METHODS:
         raise ValueError(f"Unknown benchmark method: {method}")
     make_world = world_factory or (lambda: World(gui=False))
-    execute = method_runner or _run_method
     started = clock()
     try:
         with make_world() as world:
             world.reset_from_scenario(scenario)
-            raw_result = execute(method, scenario, world)
+            raw_result = (
+                method_runner(method, scenario, world)
+                if method_runner is not None
+                else _run_method(method, scenario, world, perturbation)
+            )
             objective = objective_evaluator(world)
     except Exception as error:
         elapsed = max(0.0, clock() - started)
-        return _exception_result(method, scenario, error, elapsed)
+        return _exception_result(method, scenario, error, elapsed, perturbation)
     elapsed = max(0.0, clock() - started)
-    return _normalize_result(method, scenario, raw_result, objective, elapsed)
+    return _normalize_result(
+        method,
+        scenario,
+        raw_result,
+        objective,
+        elapsed,
+        perturbation,
+    )
 
 
 def run_benchmark(
@@ -96,31 +117,49 @@ def run_benchmark(
     save_outputs: bool = True,
     episode_runner: EpisodeRunner | None = None,
     clock: Callable[[], float] = perf_counter,
+    perturbations: Iterable[str | BenchmarkPerturbation] | None = None,
 ) -> BenchmarkRun:
-    """Run seed-major/method-minor episodes sequentially without retries."""
+    """Run deterministic episodes sequentially without benchmark-level retries."""
     if not isinstance(start_seed, int) or isinstance(start_seed, bool):
         raise ValueError("start_seed must be an integer")
     if not isinstance(episodes, int) or isinstance(episodes, bool) or episodes <= 0:
         raise ValueError("episodes must be a positive integer")
     selected_methods = _ordered_methods(methods)
-    run_one = episode_runner or (
-        lambda method, scenario: run_episode(method, scenario)
+    selected_perturbations = ordered_perturbations(perturbations)
+    conditions: tuple[BenchmarkPerturbation | None, ...] = (
+        selected_perturbations if selected_perturbations else (None,)
     )
     seeds = tuple(range(start_seed, start_seed + episodes))
     records: list[EpisodeResult] = []
     started = clock()
-    for seed in seeds:
-        scenario = generate_scenario(
-            seed,
-            difficulty,
-            distractor_count=seed % 3,
-        )
-        for method in selected_methods:
-            try:
-                record = run_one(method, scenario)
-            except Exception as error:
-                record = _exception_result(method, scenario, error, 0.0)
-            records.append(record)
+    for perturbation in conditions:
+        for seed in seeds:
+            scenario = generate_scenario(
+                seed,
+                difficulty,
+                distractor_count=seed % 3,
+            )
+            for method in selected_methods:
+                try:
+                    if episode_runner is None:
+                        record = run_episode(
+                            method,
+                            scenario,
+                            perturbation=perturbation,
+                        )
+                    elif perturbation is None:
+                        record = episode_runner(method, scenario)
+                    else:
+                        record = episode_runner(method, scenario, perturbation)
+                except Exception as error:
+                    record = _exception_result(
+                        method,
+                        scenario,
+                        error,
+                        0.0,
+                        perturbation,
+                    )
+                records.append(record)
     total_runtime = max(0.0, clock() - started)
     created_at = datetime.now(UTC)
     metadata = {
@@ -129,10 +168,33 @@ def run_benchmark(
         "start_seed": start_seed,
         "seeds": list(seeds),
         "methods": list(selected_methods),
+        "perturbations": [
+            perturbation.to_dict()
+            for perturbation in selected_perturbations
+        ],
+        "perturbation_protocol": (
+            None
+            if not selected_perturbations
+            else {
+                "condition_order": [
+                    perturbation.name
+                    for perturbation in selected_perturbations
+                ],
+                "application": "first relevant manipulation attempt only",
+                "recovery_attempts_perturbed": False,
+                "benchmark_level_retries": 0,
+            }
+        ),
         "scenario_difficulty": difficulty,
         "distractor_rule": "seed % 3",
-        "episode_order": "seed_major_method_minor",
+        "episode_order": (
+            "perturbation_major_seed_major_method_minor"
+            if selected_perturbations
+            else "seed_major_method_minor"
+        ),
         "scenario_count": len(seeds),
+        "condition_count": len(selected_perturbations),
+        "scenario_condition_count": len(seeds) * len(conditions),
         "episode_count": len(records),
         "max_recovery_attempts": MAX_RECOVERY_ATTEMPTS,
         "git_commit": _git_commit(),
@@ -143,6 +205,7 @@ def run_benchmark(
     run = BenchmarkRun(
         episodes=tuple(records),
         summary=summarize_episodes(records),
+        perturbation_summary=_summarize_perturbations(records),
         metadata=metadata,
     )
     if save_outputs:
@@ -178,25 +241,58 @@ def save_run(
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
         writer.writerows(episode.to_dict() for episode in run.episodes)
-    _write_json(
-        destination / "summary.json",
-        {"benchmark_version": BENCHMARK_VERSION, "methods": run.summary},
-    )
+    summary_payload: dict[str, Any] = {
+        "benchmark_version": BENCHMARK_VERSION,
+        "methods": run.summary,
+    }
+    if run.perturbation_summary:
+        summary_payload["perturbations"] = run.perturbation_summary
+    _write_json(destination / "summary.json", summary_payload)
     _write_json(destination / "metadata.json", dict(run.metadata))
     return destination
 
 
-def _run_method(method: str, scenario: Scenario, world: World) -> Any:
+def _run_method(
+    method: str,
+    scenario: Scenario,
+    world: World,
+    perturbation: BenchmarkPerturbation | None = None,
+) -> Any:
     if method == "oracle_scripted":
-        return oracle_pick_place(world)
+        if perturbation is None:
+            return oracle_pick_place(world)
+        return oracle_pick_place(
+            world,
+            grasp_xy_offset=perturbation.grasp_xy_offset,
+            placement_xy_offset=perturbation.placement_xy_offset,
+        )
     instruction = scenario.task.instruction
+    planner = (
+        FirstAttemptPerturbingPlanner(perturbation)
+        if perturbation is not None
+        else None
+    )
     if method == "vision_open_loop":
-        return VisionOpenLoopAgent().run(instruction, world)
+        agent = VisionOpenLoopAgent() if planner is None else VisionOpenLoopAgent(
+            planner=planner
+        )
+        return agent.run(instruction, world)
     if method == "vision_closed_loop":
-        return VisionClosedLoopAgent().run(instruction, world)
+        agent = (
+            VisionClosedLoopAgent()
+            if planner is None
+            else VisionClosedLoopAgent(planner=planner)
+        )
+        return agent.run(instruction, world)
     if method == "vision_recovery":
-        # Deliberately no RecoveryFaultInjection: Phase 11A is clean.
-        return VisionRecoveryAgent().run(instruction, world)
+        # The benchmark planner shifts only its first plan. The agent's fresh
+        # recovery replan is nominal, and RecoveryFaultInjection is never used.
+        agent = (
+            VisionRecoveryAgent()
+            if planner is None
+            else VisionRecoveryAgent(planner=planner)
+        )
+        return agent.run(instruction, world)
     raise ValueError(f"Unknown benchmark method: {method}")
 
 
@@ -206,6 +302,7 @@ def _normalize_result(
     result: Any,
     objective: PlacementEvaluation,
     elapsed: float,
+    perturbation: BenchmarkPerturbation | None = None,
 ) -> EpisodeResult:
     if method == "oracle_scripted":
         agent_success = bool(result.success)
@@ -215,6 +312,9 @@ def _normalize_result(
         recovery_activated = False
         recovery_attempts = 0
         recovery_success = None
+        recovery_stage = None
+        recovered = None
+        recovery_final_verification = None
         grasp_verification = None
         placement_verification = None
         verification_failures = 0
@@ -249,6 +349,21 @@ def _normalize_result(
             if method == "vision_recovery" and recovery_activated
             else None
         )
+        recovery_stage = (
+            getattr(result, "recovery_stage", None)
+            if method == "vision_recovery"
+            else None
+        )
+        recovered = (
+            bool(getattr(result, "recovered", False))
+            if method == "vision_recovery"
+            else None
+        )
+        recovery_final_verification = (
+            _recovery_final_verification(result)
+            if method == "vision_recovery"
+            else None
+        )
         grasp_verification = _verified(
             getattr(result, "grasp_verification", None)
         )
@@ -277,7 +392,7 @@ def _normalize_result(
         failure_stage = "placement"
         failure_reason = objective.failure_reason
     return EpisodeResult(
-        **_identity(method, scenario),
+        **_identity(method, scenario, perturbation),
         agent_success=agent_success,
         task_success=bool(objective.success),
         grasp_success=grasp_success,
@@ -287,6 +402,9 @@ def _normalize_result(
         recovery_activated=recovery_activated,
         recovery_attempts=recovery_attempts,
         recovery_success=recovery_success,
+        recovery_stage=recovery_stage,
+        recovered=recovered,
+        recovery_final_verification_result=recovery_final_verification,
         grasp_verification_result=grasp_verification,
         placement_verification_result=placement_verification,
         verification_failure_count=verification_failures,
@@ -325,15 +443,29 @@ def _verified(value: Any) -> bool | None:
     return None if value is None else bool(value.verified)
 
 
+def _recovery_final_verification(result: Any) -> bool | None:
+    trace = getattr(result, "recovery_trace", None)
+    if trace is None:
+        return None
+    for value in (
+        trace.recovery_placement_verification,
+        trace.recovery_grasp_verification,
+    ):
+        if value is not None:
+            return bool(value.verified)
+    return None
+
+
 def _exception_result(
     method: str,
     scenario: Scenario,
     error: Exception,
     elapsed: float,
+    perturbation: BenchmarkPerturbation | None = None,
 ) -> EpisodeResult:
     detail = f"{type(error).__name__}: {error}"
     return EpisodeResult(
-        **_identity(method, scenario),
+        **_identity(method, scenario, perturbation),
         agent_success=None,
         task_success=False,
         grasp_success=None,
@@ -343,6 +475,9 @@ def _exception_result(
         recovery_activated=None,
         recovery_attempts=None,
         recovery_success=None,
+        recovery_stage=None,
+        recovered=None,
+        recovery_final_verification_result=None,
         grasp_verification_result=None,
         placement_verification_result=None,
         verification_failure_count=0,
@@ -357,7 +492,11 @@ def _exception_result(
     )
 
 
-def _identity(method: str, scenario: Scenario) -> dict[str, Any]:
+def _identity(
+    method: str,
+    scenario: Scenario,
+    perturbation: BenchmarkPerturbation | None = None,
+) -> dict[str, Any]:
     return {
         "benchmark_version": BENCHMARK_VERSION,
         "method": method,
@@ -369,7 +508,59 @@ def _identity(method: str, scenario: Scenario) -> dict[str, Any]:
         "source_type": scenario.source.object_type,
         "target_color": scenario.target.color,
         "target_type": scenario.target.object_type,
+        "perturbation_name": (
+            None if perturbation is None else perturbation.name
+        ),
+        "perturbation_stage": (
+            None if perturbation is None else perturbation.stage
+        ),
+        "perturbation_axis": (
+            None if perturbation is None else perturbation.axis
+        ),
+        "perturbation_offset_m": (
+            None if perturbation is None else perturbation.offset_m
+        ),
+        "perturbation_first_attempt_only": (
+            None if perturbation is None else perturbation.first_attempt_only
+        ),
     }
+
+
+def _summarize_perturbations(
+    records: Iterable[EpisodeResult],
+) -> dict[str, dict[str, dict[str, int | float | None]]]:
+    names = tuple(
+        dict.fromkeys(
+            item.perturbation_name
+            for item in records
+            if item.perturbation_name is not None
+        )
+    )
+    summaries: dict[str, dict[str, dict[str, int | float | None]]] = {}
+    for name in names:
+        grouped = [item for item in records if item.perturbation_name == name]
+        method_summaries = summarize_episodes(grouped)
+        for method, summary in method_summaries.items():
+            method_records = [item for item in grouped if item.method == method]
+            summary["verification_failures"] = sum(
+                item.verification_failure_count for item in method_records
+            )
+            summary["recovery_activations"] = sum(
+                item.recovery_activated is True for item in method_records
+            )
+            summary["successful_recoveries"] = sum(
+                item.recovery_success is True for item in method_records
+            )
+            summary["intended_verification_failures"] = sum(
+                (
+                    item.failure_stage == f"{item.perturbation_stage}_verification"
+                    or item.recovery_stage
+                    == f"{item.perturbation_stage}_verification"
+                )
+                for item in method_records
+            )
+        summaries[name] = method_summaries
+    return summaries
 
 
 def _ordered_methods(methods: Iterable[str]) -> tuple[str, ...]:
@@ -387,7 +578,7 @@ def _ordered_methods(methods: Iterable[str]) -> tuple[str, ...]:
 def _default_run_id(start_seed: int, episodes: int, created_at: datetime) -> str:
     end_seed = start_seed + episodes - 1
     timestamp = created_at.strftime("%Y%m%dT%H%M%SZ")
-    return f"phase11a-seeds-{start_seed}-{end_seed}-{timestamp}"
+    return f"{BENCHMARK_VERSION}-seeds-{start_seed}-{end_seed}-{timestamp}"
 
 
 def _git_commit() -> str | None:
@@ -435,22 +626,34 @@ def _print_report(run: BenchmarkRun) -> None:
             f"{_number(summary['mean_simulation_steps'])}\t"
             f"{_number(summary['mean_wall_clock_seconds'])}"
         )
-    print("\nseed\toracle\topen_loop\tclosed_loop\trecovery")
-    by_key = {(item.seed, item.method): item for item in run.episodes}
-    for seed in run.metadata["seeds"]:
-        cells = []
-        for method in METHODS:
-            item = by_key.get((seed, method))
-            cells.append(
-                "-" if item is None else ("S" if item.task_success else "F")
-            )
-        print(f"{seed}\t" + "\t".join(cells))
+    conditions = (
+        tuple(run.perturbation_summary)
+        if run.perturbation_summary
+        else (None,)
+    )
+    by_key = {
+        (item.perturbation_name, item.seed, item.method): item
+        for item in run.episodes
+    }
+    for condition in conditions:
+        if condition is not None:
+            print(f"\nperturbation: {condition}")
+        print("seed\toracle\topen_loop\tclosed_loop\trecovery")
+        for seed in run.metadata["seeds"]:
+            cells = []
+            for method in METHODS:
+                item = by_key.get((condition, seed, method))
+                cells.append(
+                    "-" if item is None else ("S" if item.task_success else "F")
+                )
+            print(f"{seed}\t" + "\t".join(cells))
     failures = [item for item in run.episodes if not item.task_success]
     print("\nfailed episodes:")
     if not failures:
         print("none")
     for item in failures:
         print(
+            f"perturbation={item.perturbation_name} "
             f"seed={item.seed} method={item.method} "
             f"stage={item.failure_stage} reason={item.failure_reason} "
             f"instruction={item.instruction}"
@@ -488,6 +691,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=METHODS,
         default=list(METHODS),
     )
+    parser.add_argument(
+        "--perturbations",
+        nargs="+",
+        choices=PERTURBATION_NAMES,
+    )
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--run-id")
     args = parser.parse_args(argv)
@@ -495,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
         start_seed=args.start_seed,
         episodes=args.episodes,
         methods=args.methods,
+        perturbations=args.perturbations,
         output_root=args.output_root,
         run_id=args.run_id,
     )

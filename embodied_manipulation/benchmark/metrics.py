@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from math import fsum
 from typing import Any, Iterable
 
-BENCHMARK_VERSION = "phase14a-clean-v2"
+BENCHMARK_VERSION = "phase14b-perturb-v1"
 METHODS = (
     "oracle_scripted",
     "vision_open_loop",
@@ -28,6 +28,11 @@ CSV_FIELDS = (
     "source_type",
     "target_color",
     "target_type",
+    "perturbation_name",
+    "perturbation_stage",
+    "perturbation_axis",
+    "perturbation_offset_m",
+    "perturbation_first_attempt_only",
     "agent_success",
     "task_success",
     "grasp_success",
@@ -37,6 +42,9 @@ CSV_FIELDS = (
     "recovery_activated",
     "recovery_attempts",
     "recovery_success",
+    "recovery_stage",
+    "recovered",
+    "recovery_final_verification_result",
     "grasp_verification_result",
     "placement_verification_result",
     "verification_failure_count",
@@ -70,6 +78,11 @@ class EpisodeResult:
     source_type: str
     target_color: str
     target_type: str
+    perturbation_name: str | None
+    perturbation_stage: str | None
+    perturbation_axis: str | None
+    perturbation_offset_m: float | None
+    perturbation_first_attempt_only: bool | None
     agent_success: bool | None
     task_success: bool
     grasp_success: bool | None
@@ -79,6 +92,9 @@ class EpisodeResult:
     recovery_activated: bool | None
     recovery_attempts: int | None
     recovery_success: bool | None
+    recovery_stage: str | None
+    recovered: bool | None
+    recovery_final_verification_result: bool | None
     grasp_verification_result: bool | None
     placement_verification_result: bool | None
     verification_failure_count: int
@@ -100,6 +116,17 @@ class EpisodeResult:
             raise ValueError("verification_failure_count must be nonnegative")
         if self.wall_clock_seconds < 0.0:
             raise ValueError("wall_clock_seconds must be nonnegative")
+        perturbation_values = (
+            self.perturbation_name,
+            self.perturbation_stage,
+            self.perturbation_axis,
+            self.perturbation_offset_m,
+            self.perturbation_first_attempt_only,
+        )
+        if any(value is not None for value in perturbation_values) and any(
+            value is None for value in perturbation_values
+        ):
+            raise ValueError("Perturbation fields must be all populated or all null")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON/CSV-safe flat mapping in the stable schema."""

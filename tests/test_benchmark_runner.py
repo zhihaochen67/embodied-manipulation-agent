@@ -54,6 +54,11 @@ def _episode(
         source_type=scenario.source.object_type,
         target_color=scenario.target.color,
         target_type=scenario.target.object_type,
+        perturbation_name=None,
+        perturbation_stage=None,
+        perturbation_axis=None,
+        perturbation_offset_m=None,
+        perturbation_first_attempt_only=None,
         agent_success=True,
         task_success=True,
         grasp_success=True,
@@ -63,6 +68,9 @@ def _episode(
         recovery_activated=False,
         recovery_attempts=0,
         recovery_success=None,
+        recovery_stage=None,
+        recovered=False if method == "vision_recovery" else None,
+        recovery_final_verification_result=None,
         grasp_verification_result=None,
         placement_verification_result=None,
         verification_failure_count=0,
@@ -105,7 +113,7 @@ def test_benchmark_metadata_uses_tracked_version() -> None:
         episode_runner=lambda method, _: _episode(method, scenario),
     )
 
-    assert BENCHMARK_VERSION == "phase14a-clean-v2"
+    assert BENCHMARK_VERSION == "phase14b-perturb-v1"
     assert run.metadata["benchmark_version"] == BENCHMARK_VERSION
 
 

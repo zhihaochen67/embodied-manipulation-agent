@@ -89,6 +89,7 @@ def oracle_pick(
     waypoint_count: int = CARTESIAN_WAYPOINT_COUNT,
     step_delay: float = 0.0,
     stage_pause: float = 0.0,
+    grasp_xy_offset: tuple[float, float] = (0.0, 0.0),
 ) -> PickResult:
     """Execute one oracle open, approach, close, lift, and hold sequence."""
     if world.scene is None:
@@ -106,6 +107,10 @@ def oracle_pick(
         raise ValueError("step_delay must be nonnegative and finite")
     if not isfinite(stage_pause) or stage_pause < 0.0:
         raise ValueError("stage_pause must be nonnegative and finite")
+    if len(grasp_xy_offset) != 2 or not all(
+        isfinite(value) for value in grasp_xy_offset
+    ):
+        raise ValueError("grasp_xy_offset must contain exactly two finite values")
     for value, name in (
         (arm_max_steps, "arm_max_steps"),
         (contact_settle_steps, "contact_settle_steps"),
@@ -118,13 +123,13 @@ def oracle_pick(
     scene = world.scene
     initial_cube_position, _ = world.get_cube_pose()
     pregrasp_target = (
-        initial_cube_position[0],
-        initial_cube_position[1],
+        initial_cube_position[0] + grasp_xy_offset[0],
+        initial_cube_position[1] + grasp_xy_offset[1],
         initial_cube_position[2] + pregrasp_clearance,
     )
     grasp_target = (
-        initial_cube_position[0],
-        initial_cube_position[1],
+        initial_cube_position[0] + grasp_xy_offset[0],
+        initial_cube_position[1] + grasp_xy_offset[1],
         initial_cube_position[2] + grasp_target_z_offset,
     )
     lift_target = (
