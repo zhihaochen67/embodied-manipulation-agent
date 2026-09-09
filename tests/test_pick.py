@@ -49,6 +49,10 @@ def _controlled_close(
     assert world.scene is not None
     gripper = PandaGripper(world.client_id, world.scene.robot_id)
     simulation_step = 0
+    body_ids = tuple(
+        int(pybullet.getBodyUniqueId(index, physicsClientId=world.client_id))
+        for index in range(pybullet.getNumBodies(physicsClientId=world.client_id))
+    )
 
     def step_simulation(*_: object, **__: object) -> None:
         nonlocal simulation_step
@@ -62,12 +66,16 @@ def _controlled_close(
         return 0.03, 0.03
 
     def get_contacts(*_: object, **kwargs: object) -> tuple[tuple[object, ...], ...]:
-        body_id = int(kwargs["bodyB"])
         contacts = []
-        for link_index in contact_links(simulation_step, body_id):
-            contact = [0] * 10
-            contact[3] = link_index
-            contacts.append(tuple(contact))
+        queried_body_ids = (
+            (int(kwargs["bodyB"]),) if "bodyB" in kwargs else body_ids
+        )
+        for body_id in queried_body_ids:
+            for link_index in contact_links(simulation_step, body_id):
+                contact = [0] * 10
+                contact[2] = body_id
+                contact[3] = link_index
+                contacts.append(tuple(contact))
         return tuple(contacts)
 
     monkeypatch.setattr(gripper, "_command", lambda _: None)
@@ -180,6 +188,10 @@ def test_sustained_bilateral_target_contact_completes_close(
     assert not result.reached_target
     assert not result.stalled
     assert result.termination_reason == "bilateral_target_contact"
+    assert result.target_contact_observed
+    assert result.bilateral_target_contact_observed
+    assert not result.persistent_bilateral_non_target_contact_observed
+    assert result.timeout_diagnostic is None
 
 
 def test_unilateral_target_contact_cannot_complete_close(
@@ -199,6 +211,9 @@ def test_unilateral_target_contact_cannot_complete_close(
 
     assert not result.success
     assert result.termination_reason == "timeout"
+    assert result.target_contact_observed
+    assert not result.bilateral_target_contact_observed
+    assert result.timeout_diagnostic == "target_contact_not_bilateral"
 
 
 def test_transient_bilateral_target_contact_cannot_complete_close(
@@ -221,6 +236,9 @@ def test_transient_bilateral_target_contact_cannot_complete_close(
 
     assert not result.success
     assert result.termination_reason == "timeout"
+    assert result.target_contact_observed
+    assert result.bilateral_target_contact_observed
+    assert result.timeout_diagnostic == "bilateral_target_contact_not_sustained"
 
 
 def test_bilateral_non_target_contact_cannot_complete_close(
@@ -241,6 +259,11 @@ def test_bilateral_non_target_contact_cannot_complete_close(
 
     assert not result.success
     assert result.termination_reason == "timeout"
+    assert not result.target_contact_observed
+    assert not result.bilateral_target_contact_observed
+    assert result.persistent_bilateral_non_target_contact_observed
+    assert result.persistent_bilateral_non_target_body_ids == (non_target_id,)
+    assert result.timeout_diagnostic == "persistent_bilateral_non_target_contact"
 
 
 def test_no_completion_evidence_still_times_out(
@@ -259,6 +282,11 @@ def test_no_completion_evidence_still_times_out(
     assert result.steps == CLOSE_MINIMUM_COMPLETION_STEPS + 4
     assert result.failure_reason == "Timed out after 24 simulation steps"
     assert result.termination_reason == "timeout"
+    assert not result.target_contact_observed
+    assert not result.bilateral_target_contact_observed
+    assert not result.persistent_bilateral_non_target_contact_observed
+    assert result.persistent_bilateral_non_target_body_ids == ()
+    assert result.timeout_diagnostic == "no_target_contact"
 
 
 def test_stable_stall_precedes_bilateral_contact(
@@ -281,6 +309,8 @@ def test_stable_stall_precedes_bilateral_contact(
     assert result.steps == CLOSE_MINIMUM_COMPLETION_STEPS
     assert result.stalled
     assert result.termination_reason == "stable_stall"
+    assert result.target_contact_observed
+    assert result.bilateral_target_contact_observed
 
 
 def test_target_position_precedes_bilateral_contact(
@@ -312,6 +342,8 @@ def test_target_position_precedes_bilateral_contact(
     assert result.reached_target
     assert not result.stalled
     assert result.termination_reason == "target_reached"
+    assert result.target_contact_observed
+    assert result.bilateral_target_contact_observed
 
 
 def test_oracle_pick_physically_lifts_and_holds_cube(world: World) -> None:

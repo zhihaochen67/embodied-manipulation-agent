@@ -14,9 +14,12 @@ from embodied_manipulation.simulation.robot import (
     validate_franka_model,
 )
 
-from .ik import IKError, solve_inverse_kinematics
+from .ik import IKError, solve_inverse_kinematics_with_diagnostics
 
 DEFAULT_CUBE_CLEARANCE = 0.25
+IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE = (
+    "ik_residual_exceeds_execution_tolerance"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +35,10 @@ class ReachResult:
     target_joint_positions: tuple[float, ...] | None
     final_joint_positions: tuple[float, ...]
     failure_reason: str | None = None
+    failure_code: str | None = None
+    ik_position_residual: float | None = None
+    required_position_tolerance: float | None = None
+    ik_joint_solution_valid: bool | None = None
 
 
 class ArmController:
@@ -85,7 +92,7 @@ class ArmController:
             raise ValueError("after_step must be callable")
 
         try:
-            joint_targets = solve_inverse_kinematics(
+            ik_solution = solve_inverse_kinematics_with_diagnostics(
                 self.client_id,
                 self.robot_id,
                 target,
@@ -98,6 +105,28 @@ class ArmController:
                 target=target,
                 joint_targets=None,
                 failure_reason=str(error),
+                failure_code="ik_solution_invalid",
+                ik_position_residual=None,
+                required_position_tolerance=position_tolerance,
+                ik_joint_solution_valid=False,
+            )
+
+        joint_targets = ik_solution.joint_positions
+        if ik_solution.position_residual > position_tolerance:
+            return self._result(
+                success=False,
+                steps=0,
+                target=target,
+                joint_targets=joint_targets,
+                failure_reason=(
+                    f"IK position residual {ik_solution.position_residual:.6f} m "
+                    "exceeds execution position tolerance "
+                    f"{position_tolerance:.6f} m"
+                ),
+                failure_code=IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE,
+                ik_position_residual=ik_solution.position_residual,
+                required_position_tolerance=position_tolerance,
+                ik_joint_solution_valid=True,
             )
 
         commanded = list(get_arm_joint_positions(self.client_id, self.robot_id))
@@ -137,6 +166,10 @@ class ArmController:
                     target=target,
                     joint_targets=joint_targets,
                     failure_reason=None,
+                    failure_code=None,
+                    ik_position_residual=ik_solution.position_residual,
+                    required_position_tolerance=position_tolerance,
+                    ik_joint_solution_valid=True,
                 )
 
         return self._result(
@@ -145,6 +178,10 @@ class ArmController:
             target=target,
             joint_targets=joint_targets,
             failure_reason=f"Timed out after {max_steps} simulation steps",
+            failure_code="execution_timeout",
+            ik_position_residual=ik_solution.position_residual,
+            required_position_tolerance=position_tolerance,
+            ik_joint_solution_valid=True,
         )
 
     def _result(
@@ -155,6 +192,10 @@ class ArmController:
         target: tuple[float, float, float],
         joint_targets: tuple[float, ...] | None,
         failure_reason: str | None,
+        failure_code: str | None,
+        ik_position_residual: float | None,
+        required_position_tolerance: float,
+        ik_joint_solution_valid: bool,
     ) -> ReachResult:
         final_position, final_orientation = self.end_effector_pose()
         return ReachResult(
@@ -170,6 +211,10 @@ class ArmController:
                 self.robot_id,
             ),
             failure_reason=failure_reason,
+            failure_code=failure_code,
+            ik_position_residual=ik_position_residual,
+            required_position_tolerance=required_position_tolerance,
+            ik_joint_solution_valid=ik_joint_solution_valid,
         )
 
 

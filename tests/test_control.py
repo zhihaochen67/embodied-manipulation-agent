@@ -4,12 +4,17 @@ import numpy as np
 import pybullet
 import pytest
 
+import embodied_manipulation.control.arm_controller as arm_controller_module
 from embodied_manipulation.control import (
+    IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE,
     ArmController,
     IKError,
+    IKSolution,
     solve_inverse_kinematics,
     target_above_cube,
 )
+from embodied_manipulation.control.open_loop import execute_open_loop_plan
+from embodied_manipulation.control.pick import PICK_POSITION_TOLERANCE
 from embodied_manipulation.simulation import World
 from embodied_manipulation.simulation.robot import (
     PANDA_ARM_JOINT_INDICES,
@@ -18,6 +23,7 @@ from embodied_manipulation.simulation.robot import (
     PANDA_END_EFFECTOR_LINK_NAME,
     PANDA_FINGER_JOINT_INDICES,
     PANDA_FINGER_JOINT_NAMES,
+    get_arm_joint_positions,
 )
 
 
@@ -98,11 +104,18 @@ def test_ik_returns_finite_seven_joint_targets(
 def test_reaches_known_target(world: World) -> None:
     assert world.scene is not None
     controller = ArmController(world.client_id, world.scene.robot_id)
-    result = controller.move_end_effector((0.50, 0.00, 0.40))
+    result = controller.move_end_effector(
+        (0.50, 0.00, 0.40),
+        position_tolerance=PICK_POSITION_TOLERANCE,
+    )
 
     assert result.success
     assert result.steps <= 480
-    assert result.position_error <= 0.01
+    assert result.position_error <= PICK_POSITION_TOLERANCE
+    assert result.ik_position_residual is not None
+    assert result.ik_position_residual <= PICK_POSITION_TOLERANCE
+    assert result.required_position_tolerance == PICK_POSITION_TOLERANCE
+    assert result.ik_joint_solution_valid
     assert len(result.final_joint_positions) == 7
 
 
@@ -186,3 +199,126 @@ def test_controller_timeout_does_not_hang(world: World) -> None:
     assert result.steps == 1
     assert result.failure_reason is not None
     assert "Timed out" in result.failure_reason
+
+
+def test_executor_admits_single_ik_candidate_within_position_tolerance(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    controller = ArmController(world.client_id, world.scene.robot_id)
+    target = controller.end_effector_pose()[0]
+    joints = get_arm_joint_positions(world.client_id, world.scene.robot_id)
+    solver_calls = 0
+    step_calls = 0
+
+    def solve(*_: object, **__: object) -> IKSolution:
+        nonlocal solver_calls
+        solver_calls += 1
+        return IKSolution(
+            joint_positions=joints,
+            candidate_position=(target[0] + 0.003, target[1], target[2]),
+            candidate_orientation=(1.0, 0.0, 0.0, 0.0),
+            position_residual=0.003,
+            orientation_residual=0.0,
+        )
+
+    def before_step() -> None:
+        nonlocal step_calls
+        step_calls += 1
+
+    monkeypatch.setattr(
+        arm_controller_module,
+        "solve_inverse_kinematics_with_diagnostics",
+        solve,
+    )
+    result = controller.move_end_effector(
+        target,
+        position_tolerance=PICK_POSITION_TOLERANCE,
+        max_steps=2,
+        before_step=before_step,
+    )
+
+    assert result.success
+    assert result.steps == 1
+    assert solver_calls == 1
+    assert step_calls == 1
+    assert result.ik_position_residual == pytest.approx(0.003)
+    assert result.required_position_tolerance == pytest.approx(0.004)
+    assert result.ik_joint_solution_valid
+
+
+def test_executor_rejects_cartesian_inadmissible_valid_joint_solution_early(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert world.scene is not None
+    controller = ArmController(world.client_id, world.scene.robot_id)
+    target = (0.50, 0.00, 0.40)
+    joints = get_arm_joint_positions(world.client_id, world.scene.robot_id)
+    solver_calls = 0
+
+    def solve(*_: object, **__: object) -> IKSolution:
+        nonlocal solver_calls
+        solver_calls += 1
+        return IKSolution(
+            joint_positions=joints,
+            candidate_position=(target[0] + 0.005379, target[1], target[2]),
+            candidate_orientation=(1.0, 0.0, 0.0, 0.0),
+            position_residual=0.005379,
+            orientation_residual=0.0,
+        )
+
+    monkeypatch.setattr(
+        arm_controller_module,
+        "solve_inverse_kinematics_with_diagnostics",
+        solve,
+    )
+    monkeypatch.setattr(
+        pybullet,
+        "setJointMotorControlArray",
+        lambda *_args, **_kwargs: pytest.fail("inadmissible IK must not be commanded"),
+    )
+    monkeypatch.setattr(
+        pybullet,
+        "stepSimulation",
+        lambda **_kwargs: pytest.fail("inadmissible IK must not execute"),
+    )
+    result = controller.move_end_effector(
+        target,
+        position_tolerance=PICK_POSITION_TOLERANCE,
+        max_steps=480,
+        before_step=lambda: pytest.fail("before_step must not run"),
+        after_step=lambda: pytest.fail("after_step must not run"),
+    )
+
+    assert not result.success
+    assert result.steps == 0
+    assert solver_calls == 1
+    assert result.failure_code == IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE
+    assert result.ik_position_residual == pytest.approx(0.005379)
+    assert result.required_position_tolerance == pytest.approx(0.004)
+    assert result.ik_joint_solution_valid
+    assert result.target_position == target
+    assert result.target_joint_positions == joints
+    for joint_index, joint_target in zip(
+        PANDA_ARM_JOINT_INDICES,
+        result.target_joint_positions,
+        strict=True,
+    ):
+        info = pybullet.getJointInfo(
+            world.scene.robot_id,
+            joint_index,
+            physicsClientId=world.client_id,
+        )
+        assert info[8] <= joint_target <= info[9]
+    assert "0.005379 m" in (result.failure_reason or "")
+    assert "0.004000 m" in (result.failure_reason or "")
+
+
+def test_open_loop_execution_position_requirement_remains_four_millimetres() -> None:
+    assert PICK_POSITION_TOLERANCE == pytest.approx(0.004)
+    assert (
+        execute_open_loop_plan.__kwdefaults__["position_tolerance"]
+        == PICK_POSITION_TOLERANCE
+    )

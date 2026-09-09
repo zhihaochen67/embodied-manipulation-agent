@@ -57,6 +57,7 @@ class OpenLoopExecutionResult:
     close_result: GripperResult | None = None
     failure_stage: str | None = None
     failure_reason: str | None = None
+    failed_reach_result: ReachResult | None = None
 
 
 def execute_open_loop_plan(
@@ -151,6 +152,10 @@ def execute_open_loop_plan(
             constraint_count_after=constraint_count_after,
             transport_finger_targets=transport_finger_targets,
             close_result=close_result,
+            failed_reach_result=next(
+                (result for result in reversed(arm_results) if not result.success),
+                None,
+            ),
             failure_stage=failure_stage,
             failure_reason=failure_reason,
         )

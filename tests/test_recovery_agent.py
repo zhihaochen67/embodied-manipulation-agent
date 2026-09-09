@@ -13,6 +13,11 @@ from embodied_manipulation.agent import (
     VisionRecoveryAgent,
 )
 from embodied_manipulation.benchmark import generate_scenario
+from embodied_manipulation.control import (
+    IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE,
+    GripperResult,
+    ReachResult,
+)
 from embodied_manipulation.control.open_loop import OpenLoopExecutionResult
 from embodied_manipulation.control.pick_place import PlacementEvaluation
 from embodied_manipulation.language import parse_instruction
@@ -303,6 +308,132 @@ def test_failed_recovery_stops_after_one_attempt_without_evaluation() -> None:
     assert result.observation_count == 3
     assert planner.calls == 2
     assert not evaluated
+    assert result.final_evaluation is None
+
+
+def test_preverification_ik_failure_does_not_trigger_recovery_or_verification() -> None:
+    scenario = generate_scenario(10, distractor_count=1)
+    target = (0.55, 0.10, 0.20)
+    failed_reach = ReachResult(
+        success=False,
+        steps=0,
+        target_position=target,
+        final_position=(0.50, 0.00, 0.40),
+        final_orientation=(1.0, 0.0, 0.0, 0.0),
+        position_error=0.05,
+        target_joint_positions=(0.0,) * 7,
+        final_joint_positions=(0.0,) * 7,
+        failure_reason=(
+            "IK position residual 0.005379 m exceeds execution position "
+            "tolerance 0.004000 m"
+        ),
+        failure_code=IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE,
+        ik_position_residual=0.005379,
+        required_position_tolerance=0.004,
+        ik_joint_solution_valid=True,
+    )
+    execution = OpenLoopExecutionResult(
+        success=False,
+        grasp_success=False,
+        transport_success=False,
+        placement_success=False,
+        arm_steps=100,
+        gripper_steps=12,
+        settling_steps=0,
+        total_steps=112,
+        constraint_count_before=0,
+        constraint_count_after=0,
+        transport_finger_targets=None,
+        failure_stage="grasp",
+        failure_reason=f"Grasp approach failed: {failed_reach.failure_reason}",
+        failed_reach_result=failed_reach,
+    )
+    execution_calls = 0
+    evaluated = False
+    events: list[str] = []
+
+    def execute(*_: object, **__: object) -> OpenLoopExecutionResult:
+        nonlocal execution_calls
+        execution_calls += 1
+        return execution
+
+    def forbidden_evaluation(_: World) -> PlacementEvaluation:
+        nonlocal evaluated
+        evaluated = True
+        raise AssertionError("Pre-verification failure must not be evaluated")
+
+    with World(gui=False) as world:
+        world.reset_from_scenario(scenario)
+        result = VisionRecoveryAgent(
+            executor=execute,
+            evaluator=forbidden_evaluation,
+        ).run(
+            scenario.task.instruction,
+            world,
+            stage_callback=lambda stage, _: events.append(stage),
+        )
+
+    assert not result.success
+    assert execution_calls == 1
+    assert not evaluated
+    assert result.initial_execution_result is execution
+    assert result.execution_result is execution
+    assert result.execution_result.failed_reach_result is failed_reach
+    assert result.initial_grasp_verification is None
+    assert result.initial_placement_verification is None
+    assert "grasp_verified" not in events
+    assert "placement_verified" not in events
+    assert not result.recovery_activated
+    assert result.recovery_attempts == 0
+    assert result.recovery_trace is None
+
+
+def test_preverification_gripper_diagnostics_propagate_without_recovery() -> None:
+    scenario = generate_scenario(56, distractor_count=2)
+    close_result = GripperResult(
+        success=False,
+        steps=240,
+        target_opening_width=0.0,
+        final_opening_width=0.05,
+        target_finger_positions=(0.0, 0.0),
+        final_finger_positions=(0.025, 0.025),
+        max_finger_position_error=0.025,
+        reached_target=False,
+        stalled=False,
+        failure_reason="Timed out after 240 simulation steps",
+        termination_reason="timeout",
+        target_contact_observed=False,
+        bilateral_target_contact_observed=False,
+        persistent_bilateral_non_target_contact_observed=True,
+        persistent_bilateral_non_target_body_ids=(7,),
+        timeout_diagnostic="persistent_bilateral_non_target_contact",
+    )
+    execution = replace(
+        _execution(
+            False,
+            grasp_success=False,
+            placement_success=False,
+            failure_stage="grasp",
+            failure_reason="Gripper close failed: timeout",
+        ),
+        close_result=close_result,
+    )
+
+    with World(gui=False) as world:
+        world.reset_from_scenario(scenario)
+        result = VisionRecoveryAgent(
+            executor=lambda *_args, **_kwargs: execution,
+        ).run(scenario.task.instruction, world)
+
+    assert not result.success
+    assert result.initial_execution_result is execution
+    assert result.execution_result is execution
+    assert result.execution_result.close_result is close_result
+    assert result.initial_grasp_verification is None
+    assert result.initial_placement_verification is None
+    assert not result.recovery_activated
+    assert result.recovery_attempts == 0
+    assert result.recovery_trace is None
     assert result.final_evaluation is None
 
 

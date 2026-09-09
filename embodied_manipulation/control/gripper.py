@@ -38,6 +38,11 @@ class GripperResult:
     stalled: bool
     failure_reason: str | None = None
     termination_reason: str | None = None
+    target_contact_observed: bool | None = None
+    bilateral_target_contact_observed: bool | None = None
+    persistent_bilateral_non_target_contact_observed: bool | None = None
+    persistent_bilateral_non_target_body_ids: tuple[int, ...] = ()
+    timeout_diagnostic: str | None = None
 
 
 class PandaGripper:
@@ -217,6 +222,18 @@ class PandaGripper:
         previous_width = self.opening_width()
         stalled_steps = 0
         bilateral_target_contact_steps = 0
+        contact_diagnostics_enabled = allow_stall and target_body_id is not None
+        target_contact_observed: bool | None = (
+            False if contact_diagnostics_enabled else None
+        )
+        bilateral_target_contact_observed: bool | None = (
+            False if contact_diagnostics_enabled else None
+        )
+        persistent_bilateral_non_target_contact_observed: bool | None = (
+            False if contact_diagnostics_enabled else None
+        )
+        persistent_bilateral_non_target_body_ids: set[int] = set()
+        bilateral_non_target_contact_steps: dict[int, int] = {}
         for step in range(1, max_steps + 1):
             self._command(targets)
             pybullet.stepSimulation(physicsClientId=self.client_id)
@@ -241,6 +258,16 @@ class PandaGripper:
                     stalled=False,
                     failure_reason=None,
                     termination_reason="target_reached",
+                    target_contact_observed=target_contact_observed,
+                    bilateral_target_contact_observed=(
+                        bilateral_target_contact_observed
+                    ),
+                    persistent_bilateral_non_target_contact_observed=(
+                        persistent_bilateral_non_target_contact_observed
+                    ),
+                    persistent_bilateral_non_target_body_ids=tuple(
+                        sorted(persistent_bilateral_non_target_body_ids)
+                    ),
                 )
 
             states = pybullet.getJointStates(
@@ -261,15 +288,53 @@ class PandaGripper:
                 stalled_steps += 1
             else:
                 stalled_steps = 0
-            if (
-                allow_stall
-                and target_body_id is not None
-                and target_width < sum(positions)
-                and _has_bilateral_target_contact(
+            bilateral_target_contact = False
+            if contact_diagnostics_enabled:
+                contact_links_by_body = _finger_contact_links_by_body(
                     self.client_id,
                     self.robot_id,
-                    target_body_id,
                 )
+                target_contact_links = contact_links_by_body.get(
+                    target_body_id,
+                    set(),
+                )
+                target_contact_observed = (
+                    target_contact_observed or bool(target_contact_links)
+                )
+                bilateral_target_contact = target_contact_links == set(
+                    PANDA_FINGER_JOINT_INDICES
+                )
+                bilateral_target_contact_observed = (
+                    bilateral_target_contact_observed
+                    or bilateral_target_contact
+                )
+                non_target_body_ids = {
+                    body_id
+                    for body_id in contact_links_by_body
+                    if body_id not in {self.robot_id, target_body_id}
+                }
+                for body_id in (
+                    bilateral_non_target_contact_steps.keys() | non_target_body_ids
+                ):
+                    bilateral_non_target_contact = (
+                        contact_links_by_body.get(body_id, set())
+                        == set(PANDA_FINGER_JOINT_INDICES)
+                    )
+                    bilateral_non_target_contact_steps[body_id] = (
+                        bilateral_non_target_contact_steps.get(body_id, 0) + 1
+                        if bilateral_non_target_contact
+                        else 0
+                    )
+                    if (
+                        bilateral_non_target_contact_steps[body_id]
+                        >= CLOSE_CONSECUTIVE_COMPLETION_STEPS
+                    ):
+                        persistent_bilateral_non_target_body_ids.add(body_id)
+                        persistent_bilateral_non_target_contact_observed = True
+            if (
+                allow_stall
+                and target_width < sum(positions)
+                and bilateral_target_contact
             ):
                 bilateral_target_contact_steps += 1
             else:
@@ -292,6 +357,16 @@ class PandaGripper:
                     stalled=True,
                     failure_reason=None,
                     termination_reason="stable_stall",
+                    target_contact_observed=target_contact_observed,
+                    bilateral_target_contact_observed=(
+                        bilateral_target_contact_observed
+                    ),
+                    persistent_bilateral_non_target_contact_observed=(
+                        persistent_bilateral_non_target_contact_observed
+                    ),
+                    persistent_bilateral_non_target_body_ids=tuple(
+                        sorted(persistent_bilateral_non_target_body_ids)
+                    ),
                 )
             if (
                 allow_stall
@@ -309,9 +384,29 @@ class PandaGripper:
                     stalled=False,
                     failure_reason=None,
                     termination_reason="bilateral_target_contact",
+                    target_contact_observed=target_contact_observed,
+                    bilateral_target_contact_observed=(
+                        bilateral_target_contact_observed
+                    ),
+                    persistent_bilateral_non_target_contact_observed=(
+                        persistent_bilateral_non_target_contact_observed
+                    ),
+                    persistent_bilateral_non_target_body_ids=tuple(
+                        sorted(persistent_bilateral_non_target_body_ids)
+                    ),
                 )
             previous_width = sum(positions)
 
+        if not contact_diagnostics_enabled:
+            timeout_diagnostic = "generic_timeout"
+        elif persistent_bilateral_non_target_body_ids:
+            timeout_diagnostic = "persistent_bilateral_non_target_contact"
+        elif not target_contact_observed:
+            timeout_diagnostic = "no_target_contact"
+        elif not bilateral_target_contact_observed:
+            timeout_diagnostic = "target_contact_not_bilateral"
+        else:
+            timeout_diagnostic = "bilateral_target_contact_not_sustained"
         return self._result(
             success=False,
             steps=max_steps,
@@ -322,6 +417,15 @@ class PandaGripper:
             stalled=False,
             failure_reason=f"Timed out after {max_steps} simulation steps",
             termination_reason="timeout",
+            target_contact_observed=target_contact_observed,
+            bilateral_target_contact_observed=bilateral_target_contact_observed,
+            persistent_bilateral_non_target_contact_observed=(
+                persistent_bilateral_non_target_contact_observed
+            ),
+            persistent_bilateral_non_target_body_ids=tuple(
+                sorted(persistent_bilateral_non_target_body_ids)
+            ),
+            timeout_diagnostic=timeout_diagnostic,
         )
 
     def _symmetric_targets(self, opening_width: float) -> tuple[float, float]:
@@ -359,6 +463,11 @@ class PandaGripper:
         stalled: bool,
         failure_reason: str | None,
         termination_reason: str,
+        target_contact_observed: bool | None = None,
+        bilateral_target_contact_observed: bool | None = None,
+        persistent_bilateral_non_target_contact_observed: bool | None = None,
+        persistent_bilateral_non_target_body_ids: tuple[int, ...] = (),
+        timeout_diagnostic: str | None = None,
     ) -> GripperResult:
         positions = self.finger_joint_positions()
         error = max(
@@ -377,26 +486,35 @@ class PandaGripper:
             stalled=stalled,
             failure_reason=failure_reason,
             termination_reason=termination_reason,
+            target_contact_observed=target_contact_observed,
+            bilateral_target_contact_observed=(
+                bilateral_target_contact_observed
+            ),
+            persistent_bilateral_non_target_contact_observed=(
+                persistent_bilateral_non_target_contact_observed
+            ),
+            persistent_bilateral_non_target_body_ids=(
+                persistent_bilateral_non_target_body_ids
+            ),
+            timeout_diagnostic=timeout_diagnostic,
         )
 
 
-def _has_bilateral_target_contact(
+def _finger_contact_links_by_body(
     client_id: int,
     robot_id: int,
-    target_body_id: int,
-) -> bool:
-    """Return whether both Panda finger links contact the intended body."""
+) -> dict[int, set[int]]:
+    """Group contacting Panda finger links by the other body's ID."""
     contacts = pybullet.getContactPoints(
         bodyA=robot_id,
-        bodyB=target_body_id,
         physicsClientId=client_id,
     )
-    finger_links = {
-        int(contact[3])
-        for contact in contacts
-        if int(contact[3]) in PANDA_FINGER_JOINT_INDICES
-    }
-    return finger_links == set(PANDA_FINGER_JOINT_INDICES)
+    links_by_body: dict[int, set[int]] = {}
+    for contact in contacts:
+        finger_link = int(contact[3])
+        if finger_link in PANDA_FINGER_JOINT_INDICES:
+            links_by_body.setdefault(int(contact[2]), set()).add(finger_link)
+    return links_by_body
 
 
 def _finite(value: float, name: str) -> float:

@@ -1,6 +1,7 @@
 """Inverse kinematics for the seven Panda arm joints."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from math import acos, dist, isfinite, pi, sqrt
 
 import pybullet
@@ -19,6 +20,17 @@ class IKError(RuntimeError):
     """Raised when PyBullet does not produce an acceptable IK solution."""
 
 
+@dataclass(frozen=True, slots=True)
+class IKSolution:
+    """A broadly valid IK candidate and its measured forward-kinematics pose."""
+
+    joint_positions: tuple[float, ...]
+    candidate_position: tuple[float, float, float]
+    candidate_orientation: tuple[float, float, float, float]
+    position_residual: float
+    orientation_residual: float
+
+
 def solve_inverse_kinematics(
     client_id: int,
     robot_id: int,
@@ -29,6 +41,31 @@ def solve_inverse_kinematics(
     max_orientation_error: float = 0.15,
 ) -> tuple[float, ...]:
     """Return finite, limit-clamped targets for only the seven arm joints."""
+    return solve_inverse_kinematics_with_diagnostics(
+        client_id,
+        robot_id,
+        target_position,
+        target_orientation,
+        max_position_error=max_position_error,
+        max_orientation_error=max_orientation_error,
+    ).joint_positions
+
+
+def solve_inverse_kinematics_with_diagnostics(
+    client_id: int,
+    robot_id: int,
+    target_position: Sequence[float],
+    target_orientation: Sequence[float] | None = None,
+    *,
+    max_position_error: float = 0.03,
+    max_orientation_error: float = 0.15,
+) -> IKSolution:
+    """Return one broadly valid IK candidate with its FK residuals.
+
+    The broad residual thresholds remain solver-level sanity checks. Callers with
+    stricter completion predicates must separately decide whether this single
+    candidate is admissible for their execution contract.
+    """
     position = _finite_vector(target_position, 3, "target_position")
     orientation = _normalized_quaternion(
         DEFAULT_END_EFFECTOR_ORIENTATION
@@ -108,7 +145,13 @@ def solve_inverse_kinematics(
             f"IK orientation residual {orientation_error:.4f} rad exceeds "
             f"{max_orientation_error:.4f} rad"
         )
-    return tuple(arm_targets)
+    return IKSolution(
+        joint_positions=tuple(arm_targets),
+        candidate_position=candidate_position,
+        candidate_orientation=candidate_orientation,
+        position_residual=position_error,
+        orientation_residual=orientation_error,
+    )
 
 
 def _movable_joints_in_ik_order(client_id: int, robot_id: int) -> tuple[int, ...]:
