@@ -7,6 +7,9 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Any
 
+from embodied_manipulation.control.arm_controller import (
+    IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE,
+)
 from embodied_manipulation.control.open_loop import (
     OpenLoopExecutionResult,
     StageGateResult,
@@ -44,6 +47,17 @@ XYOffset = tuple[float, float]
 MAX_RECOVERY_ATTEMPTS = 1
 CONTROLLED_GRASP_MISS_XY_OFFSET: XYOffset = (0.12, 0.0)
 CONTROLLED_PLACEMENT_MISS_XY_OFFSET: XYOffset = (0.18, 0.0)
+PERSISTENT_BILATERAL_NON_TARGET_CONTACT = (
+    "persistent_bilateral_non_target_contact"
+)
+PREVERIFICATION_RECOVERY_ELIGIBLE_FAILURE_CODES = frozenset(
+    {
+        IK_RESIDUAL_EXCEEDS_EXECUTION_TOLERANCE,
+        PERSISTENT_BILATERAL_NON_TARGET_CONTACT,
+    }
+)
+PREVERIFICATION_RECOVERY_ENTRY = "pre_verification"
+POSTVERIFICATION_RECOVERY_ENTRY = "post_verification"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +102,12 @@ class RecoveryTrace:
     recovery_placement_verification: PlacementVerificationResult | None
     recovered: bool
     final_failure_reason: str | None
+    recovery_entry_type: str = POSTVERIFICATION_RECOVERY_ENTRY
+    initial_execution_failure_code: str | None = None
+    initial_execution_failure_stage: str | None = None
+    fresh_recovery_observation: RGBDObservation | None = None
+    fresh_source_detection: LocalizationResult | None = None
+    fresh_target_detection: LocalizationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +288,25 @@ class VisionRecoveryAgent:
             execution_result=first.execution,
         )
         if first.grasp_verification is None:
+            failure_code = _preverification_execution_failure_code(first.execution)
+            if is_preverification_recovery_eligible(first.execution):
+                return self._recover(
+                    instruction,
+                    world,
+                    task,
+                    first,
+                    recovery_stage="pre_verification_execution",
+                    failed_observation=None,
+                    diagnosis=failure_code or "structured_execution_failure",
+                    observation_count=observation_count,
+                    step_delay=step_delay,
+                    stage_pause=stage_pause,
+                    stage_callback=stage_callback,
+                    common=common,
+                    recovery_entry_type=PREVERIFICATION_RECOVERY_ENTRY,
+                    initial_execution_failure_code=failure_code,
+                    fresh_observation_required=True,
+                )
             return _failed(
                 instruction,
                 first.execution.failure_stage or "grasp",
@@ -468,25 +507,54 @@ class VisionRecoveryAgent:
         stage_pause: float,
         stage_callback: StageCallback | None,
         common: dict[str, Any],
+        recovery_entry_type: str = POSTVERIFICATION_RECOVERY_ENTRY,
+        initial_execution_failure_code: str | None = None,
+        fresh_observation_required: bool = False,
     ) -> VisionRecoveryResult:
-        failed_result = (
-            first.grasp_verification
-            if recovery_stage == "grasp_verification"
-            else first.placement_verification
-        )
-        assert failed_result is not None
-        initial_reason = failed_result.reason
+        if recovery_entry_type == PREVERIFICATION_RECOVERY_ENTRY:
+            initial_reason = first.execution.failure_reason or (
+                "Execution stopped before grasp verification"
+            )
+            initial_execution_failure_stage = first.execution.failure_stage
+        else:
+            failed_result = (
+                first.grasp_verification
+                if recovery_stage == "grasp_verification"
+                else first.placement_verification
+            )
+            assert failed_result is not None
+            initial_reason = failed_result.reason
+            initial_execution_failure_stage = None
         _notify(stage_callback, "recovery_activated", recovery_stage)
         _notify(stage_callback, "failure_diagnosed", diagnosis)
+        recovery_observation = failed_observation
+        fresh_recovery_observation: RGBDObservation | None = None
         recovery_source: LocalizationResult | None = None
         recovery_target: LocalizationResult | None = None
         recovery_plan: ManipulationPlan | None = None
         replan_failure: str | None = None
 
-        if failed_observation is None:
-            replan_failure = "Failed verification produced no reusable RGB-D observation"
-        else:
-            perception = self._vision_factory(failed_observation)
+        if fresh_observation_required:
+            try:
+                fresh_recovery_observation = self._capture(world)
+                observation_count += 1
+                recovery_observation = fresh_recovery_observation
+                _notify(
+                    stage_callback,
+                    "fresh_recovery_observation_captured",
+                    recovery_observation,
+                )
+            except (PerceptionError, RuntimeError, ValueError) as error:
+                replan_failure = f"Fresh recovery RGB-D capture failed: {error}"
+
+        if recovery_observation is None and replan_failure is None:
+            replan_failure = (
+                "Fresh recovery RGB-D capture returned no observation"
+                if fresh_observation_required
+                else "Failed verification produced no reusable RGB-D observation"
+            )
+        elif recovery_observation is not None:
+            perception = self._vision_factory(recovery_observation)
             try:
                 recovery_source = perception.locate(
                     task.source,
@@ -528,10 +596,14 @@ class VisionRecoveryAgent:
                 recovery_stage,
                 initial_reason,
                 diagnosis,
-                failed_observation,
+                recovery_observation,
                 recovery_source,
                 recovery_target,
                 final_reason=replan_failure,
+                recovery_entry_type=recovery_entry_type,
+                initial_execution_failure_code=initial_execution_failure_code,
+                initial_execution_failure_stage=initial_execution_failure_stage,
+                fresh_observation=fresh_recovery_observation,
             )
             return _failed(
                 instruction,
@@ -562,11 +634,15 @@ class VisionRecoveryAgent:
                 recovery_stage,
                 initial_reason,
                 diagnosis,
-                failed_observation,
+                recovery_observation,
                 recovery_source,
                 recovery_target,
                 recovery_plan,
                 final_reason=reason,
+                recovery_entry_type=recovery_entry_type,
+                initial_execution_failure_code=initial_execution_failure_code,
+                initial_execution_failure_stage=initial_execution_failure_stage,
+                fresh_observation=fresh_recovery_observation,
             )
             return _failed(
                 instruction,
@@ -591,17 +667,25 @@ class VisionRecoveryAgent:
                 recovery_stage,
                 initial_reason,
                 diagnosis,
-                failed_observation,
+                recovery_observation,
                 recovery_source,
                 recovery_target,
                 recovery_plan,
                 retry.grasp_verification,
                 retry.placement_verification,
                 final_reason=reason,
+                recovery_entry_type=recovery_entry_type,
+                initial_execution_failure_code=initial_execution_failure_code,
+                initial_execution_failure_stage=initial_execution_failure_stage,
+                fresh_observation=fresh_recovery_observation,
             )
             return _failed(
                 instruction,
-                "recovery_grasp_verification",
+                (
+                    "recovery_execution"
+                    if retry.grasp_verification is None
+                    else "recovery_grasp_verification"
+                ),
                 reason,
                 observation_count=observation_count,
                 recovery_trace=trace,
@@ -622,12 +706,16 @@ class VisionRecoveryAgent:
                 recovery_stage,
                 initial_reason,
                 diagnosis,
-                failed_observation,
+                recovery_observation,
                 recovery_source,
                 recovery_target,
                 recovery_plan,
                 retry.grasp_verification,
                 final_reason=reason,
+                recovery_entry_type=recovery_entry_type,
+                initial_execution_failure_code=initial_execution_failure_code,
+                initial_execution_failure_stage=initial_execution_failure_stage,
+                fresh_observation=fresh_recovery_observation,
             )
             return _failed(
                 instruction,
@@ -647,7 +735,7 @@ class VisionRecoveryAgent:
             recovery_stage,
             initial_reason,
             diagnosis,
-            failed_observation,
+            recovery_observation,
             recovery_source,
             recovery_target,
             recovery_plan,
@@ -659,6 +747,10 @@ class VisionRecoveryAgent:
                 if retry.placement_verification.verified
                 else retry.placement_verification.reason
             ),
+            recovery_entry_type=recovery_entry_type,
+            initial_execution_failure_code=initial_execution_failure_code,
+            initial_execution_failure_stage=initial_execution_failure_stage,
+            fresh_observation=fresh_recovery_observation,
         )
         return self._finalize(
             instruction,
@@ -754,7 +846,7 @@ class VisionRecoveryAgent:
             failure_reason=failure_reason,
             total_steps=total_steps,
             observation_count=observation_count,
-            recovery_source="failed_verification_rgbd" if trace else None,
+            recovery_source=_recovery_source(trace),
             final_evaluation_source="simulator_ground_truth",
             **common,
         )
@@ -773,6 +865,10 @@ def _trace(
     *,
     recovered: bool = False,
     final_reason: str | None,
+    recovery_entry_type: str = POSTVERIFICATION_RECOVERY_ENTRY,
+    initial_execution_failure_code: str | None = None,
+    initial_execution_failure_stage: str | None = None,
+    fresh_observation: RGBDObservation | None = None,
 ) -> RecoveryTrace:
     return RecoveryTrace(
         recovery_stage=stage,
@@ -787,7 +883,63 @@ def _trace(
         recovery_placement_verification=placement,
         recovered=recovered,
         final_failure_reason=final_reason,
+        recovery_entry_type=recovery_entry_type,
+        initial_execution_failure_code=initial_execution_failure_code,
+        initial_execution_failure_stage=initial_execution_failure_stage,
+        fresh_recovery_observation=fresh_observation,
+        fresh_source_detection=(
+            source
+            if recovery_entry_type == PREVERIFICATION_RECOVERY_ENTRY
+            else None
+        ),
+        fresh_target_detection=(
+            target
+            if recovery_entry_type == PREVERIFICATION_RECOVERY_ENTRY
+            else None
+        ),
     )
+
+
+def is_preverification_recovery_eligible(
+    execution: OpenLoopExecutionResult,
+) -> bool:
+    """Return whether a diagnosed pre-verification failure permits one retry.
+
+    These two cases are intentionally benchmark-evidence-specific. A perturbed
+    target rejected by execution-aware IK may become admissible after fresh
+    visual grounding and a nominal replan. Persistent bilateral contact with a
+    non-target body indicates that fresh vision may re-localize the intended
+    source after interference. No broader controller-failure generalization is
+    implied.
+    """
+    return (
+        _preverification_execution_failure_code(execution)
+        in PREVERIFICATION_RECOVERY_ELIGIBLE_FAILURE_CODES
+    )
+
+
+def _preverification_execution_failure_code(
+    execution: OpenLoopExecutionResult,
+) -> str | None:
+    failed_reach = execution.failed_reach_result
+    if failed_reach is not None and failed_reach.failure_code is not None:
+        return failed_reach.failure_code
+    close = execution.close_result
+    if (
+        close is not None
+        and not close.success
+        and close.termination_reason == "timeout"
+    ):
+        return close.timeout_diagnostic
+    return None
+
+
+def _recovery_source(trace: RecoveryTrace | None) -> str | None:
+    if trace is None:
+        return None
+    if trace.recovery_entry_type == PREVERIFICATION_RECOVERY_ENTRY:
+        return "fresh_recovery_rgbd"
+    return "failed_verification_rgbd"
 
 
 def _diagnose_grasp(
@@ -899,6 +1051,6 @@ def _failed(
         failure_stage=stage,
         failure_reason=reason,
         total_steps=total_steps,
-        recovery_source="failed_verification_rgbd" if trace else None,
+        recovery_source=_recovery_source(trace),
         **fields,
     )

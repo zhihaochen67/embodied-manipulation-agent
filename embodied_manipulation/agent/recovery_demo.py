@@ -1,4 +1,4 @@
-"""GUI demonstrations for the two deterministic Phase 10 recovery paths."""
+"""GUI demonstrations for bounded post- and pre-verification recovery."""
 
 from __future__ import annotations
 
@@ -21,17 +21,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--failure",
-        choices=("grasp", "placement"),
+        choices=("grasp", "placement", "preverification-ik"),
         default="grasp",
         help="first-attempt fault to demonstrate",
     )
     args = parser.parse_args()
     fault = (
         RecoveryFaultInjection.grasp_miss()
-        if args.failure == "grasp"
+        if args.failure in {"grasp", "preverification-ik"}
         else RecoveryFaultInjection.placement_miss()
     )
-    scenario = generate_scenario(DEMO_SEED, distractor_count=DEMO_DISTRACTOR_COUNT)
+    seed = 10 if args.failure == "preverification-ik" else DEMO_SEED
+    distractor_count = seed % 3 if seed != DEMO_SEED else DEMO_DISTRACTOR_COUNT
+    scenario = generate_scenario(seed, distractor_count=distractor_count)
     print(f"instruction: {scenario.task.instruction}")
     print(f"controlled first-attempt failure: {args.failure}")
     try:
@@ -58,6 +60,11 @@ def main() -> None:
             print(f"observation count: {result.observation_count}")
             print(f"total simulation steps: {result.total_steps}")
             if trace is not None:
+                print(f"recovery entry type: {trace.recovery_entry_type}")
+                print(
+                    "initial execution failure code: "
+                    f"{trace.initial_execution_failure_code}"
+                )
                 print(f"diagnosis: {trace.diagnosis}")
                 if trace.recovery_source_detection is not None:
                     print(
@@ -82,6 +89,8 @@ def _print_stage(stage: str, value: object) -> None:
         "post_grasp_observation_captured": "VERIFY GRASP",
         "post_placement_observation_captured": "VERIFY PLACEMENT",
         "recovery_activated": "RECOVERY ACTIVATED",
+        "fresh_recovery_observation_captured": "FRESH RECOVERY RGB-D",
+        "failure_diagnosed": "STRUCTURED FAILURE DIAGNOSED",
         "recovery_source_grounded": "RE-GROUNDED CUBE",
         "recovery_target_grounded": "RE-GROUNDED TRAY",
         "recovery_planned": "REPLAN / RETRY",
