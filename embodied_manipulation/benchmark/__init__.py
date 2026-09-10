@@ -1,6 +1,14 @@
 """Deterministic scenarios and Phase 11A benchmark metrics."""
 
-from .metrics import BENCHMARK_VERSION, CSV_FIELDS, METHODS, EpisodeResult
+from .metrics import (
+    BENCHMARK_VERSION,
+    CONDITION_SUMMARY_FIELDS,
+    CSV_FIELDS,
+    METHODS,
+    PAIRED_SUCCESS_FIELDS,
+    EpisodeResult,
+    validate_episode_matrix,
+)
 from .perturbations import (
     PERTURBATION_NAMES,
     PERTURBATION_REGISTRY,
@@ -19,10 +27,12 @@ from .scenarios import (
 
 __all__ = [
     "BENCHMARK_VERSION",
+    "CONDITION_SUMMARY_FIELDS",
     "CSV_FIELDS",
     "CubeSpec",
     "EpisodeResult",
     "METHODS",
+    "PAIRED_SUCCESS_FIELDS",
     "PERTURBATION_NAMES",
     "PERTURBATION_REGISTRY",
     "BenchmarkPerturbation",
@@ -31,5 +41,6 @@ __all__ = [
     "TraySpec",
     "generate_scenario",
     "ordered_perturbations",
+    "validate_episode_matrix",
     "validate_scenario",
 ]

@@ -11,8 +11,10 @@ import pytest
 
 from embodied_manipulation.benchmark import (
     BENCHMARK_VERSION,
+    CONDITION_SUMMARY_FIELDS,
     CSV_FIELDS,
     METHODS,
+    PAIRED_SUCCESS_FIELDS,
     EpisodeResult,
     generate_scenario,
 )
@@ -43,6 +45,7 @@ def _episode(
     **overrides: object,
 ) -> EpisodeResult:
     vision = method != "oracle_scripted"
+    recovery = method == "vision_recovery"
     values = dict(
         benchmark_version=BENCHMARK_VERSION,
         method=method,
@@ -65,11 +68,11 @@ def _episode(
         placement_success=True,
         simulation_steps=100,
         observation_count=1 if vision else 0,
-        recovery_activated=False,
-        recovery_attempts=0,
+        recovery_activated=False if recovery else None,
+        recovery_attempts=0 if recovery else None,
         recovery_success=None,
         recovery_stage=None,
-        recovered=False if method == "vision_recovery" else None,
+        recovered=False if recovery else None,
         recovery_final_verification_result=None,
         grasp_verification_result=None,
         placement_verification_result=None,
@@ -149,6 +152,8 @@ def test_recovery_aggregate_denominators_and_nulls_are_correct() -> None:
             recovery_activated=True,
             recovery_attempts=1,
             recovery_success=False,
+            grasp_verification_failure_count=1,
+            placement_verification_failure_count=1,
             verification_failure_count=2,
         ),
     ]
@@ -208,6 +213,8 @@ def test_saved_artifacts_have_stable_flat_schema(tmp_path: Path) -> None:
         "episodes.csv",
         "summary.json",
         "metadata.json",
+        "condition_summary.csv",
+        "paired_success.csv",
     }
     with (run.output_dir / "episodes.csv").open(
         encoding="utf-8",
@@ -221,6 +228,30 @@ def test_saved_artifacts_have_stable_flat_schema(tmp_path: Path) -> None:
     metadata = json.loads((run.output_dir / "metadata.json").read_text())
     assert "git_commit" in metadata
     assert "git_worktree_dirty" in metadata
+    assert isinstance(metadata["dirty_worktree"], bool)
+    assert metadata["git_worktree_dirty"] == metadata["dirty_worktree"]
+    with (run.output_dir / "condition_summary.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        assert tuple(reader.fieldnames or ()) == CONDITION_SUMMARY_FIELDS
+        assert len(list(reader)) == 1
+    with (run.output_dir / "paired_success.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        assert tuple(reader.fieldnames or ()) == PAIRED_SUCCESS_FIELDS
+        paired_rows = list(reader)
+        assert len(paired_rows) == 1
+        assert paired_rows[0]["vision_open_task_success"] == "True"
+        assert paired_rows[0]["vision_open_grasp_success"] == "True"
+        assert paired_rows[0]["vision_open_placement_success"] == "True"
+        for prefix in ("oracle", "vision_closed", "vision_recovery"):
+            assert paired_rows[0][f"{prefix}_task_success"] == ""
+            assert paired_rows[0][f"{prefix}_grasp_success"] == ""
+            assert paired_rows[0][f"{prefix}_placement_success"] == ""
 
 
 def test_fresh_worlds_and_common_objective_success_semantics() -> None:

@@ -10,8 +10,9 @@ import subprocess
 import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from math import dist
+from math import dist, fsum
 from pathlib import Path
+from statistics import median, pstdev
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping
 
@@ -27,10 +28,13 @@ from embodied_manipulation.simulation import World
 
 from .metrics import (
     BENCHMARK_VERSION,
+    CONDITION_SUMMARY_FIELDS,
     CSV_FIELDS,
     METHODS,
+    PAIRED_SUCCESS_FIELDS,
     EpisodeResult,
     summarize_episodes,
+    validate_episode_matrix,
 )
 from .perturbations import (
     PERTURBATION_NAMES,
@@ -126,6 +130,12 @@ def run_benchmark(
         raise ValueError("episodes must be a positive integer")
     selected_methods = _ordered_methods(methods)
     selected_perturbations = ordered_perturbations(perturbations)
+    git_commit = _git_commit()
+    dirty_worktree = _git_worktree_dirty()
+    if git_commit is None:
+        raise RuntimeError("Benchmark git commit provenance is unavailable")
+    if not isinstance(dirty_worktree, bool):
+        raise RuntimeError("Benchmark worktree provenance is unavailable")
     conditions: tuple[BenchmarkPerturbation | None, ...] = (
         selected_perturbations if selected_perturbations else (None,)
     )
@@ -197,8 +207,9 @@ def run_benchmark(
         "scenario_condition_count": len(seeds) * len(conditions),
         "episode_count": len(records),
         "max_recovery_attempts": MAX_RECOVERY_ATTEMPTS,
-        "git_commit": _git_commit(),
-        "git_worktree_dirty": _git_worktree_dirty(),
+        "git_commit": git_commit,
+        "dirty_worktree": dirty_worktree,
+        "git_worktree_dirty": dirty_worktree,
         "python_version": platform.python_version(),
         "total_wall_clock_seconds": total_runtime,
     }
@@ -227,6 +238,21 @@ def save_run(
         or any(character in run_id for character in ("/", "\\"))
     ):
         raise ValueError("run_id must be one non-empty path component")
+    perturbations = tuple(run.metadata["perturbations"])
+    expected_conditions = (
+        tuple(item["name"] for item in perturbations)
+        if perturbations
+        else (None,)
+    )
+    validate_episode_matrix(
+        run.episodes,
+        expected_record_count=int(run.metadata["episode_count"]),
+        expected_conditions=expected_conditions,
+        expected_seeds=run.metadata["seeds"],
+        expected_methods=run.metadata["methods"],
+    )
+    condition_rows = _condition_summary_rows(run.episodes)
+    paired_rows = _paired_success_rows(run.episodes)
     destination = Path(output_root) / run_id
     destination.mkdir(parents=True, exist_ok=False)
     with (destination / "episodes.jsonl").open("w", encoding="utf-8") as handle:
@@ -249,7 +275,247 @@ def save_run(
         summary_payload["perturbations"] = run.perturbation_summary
     _write_json(destination / "summary.json", summary_payload)
     _write_json(destination / "metadata.json", dict(run.metadata))
+    _write_csv(
+        destination / "condition_summary.csv",
+        CONDITION_SUMMARY_FIELDS,
+        condition_rows,
+    )
+    _write_csv(
+        destination / "paired_success.csv",
+        PAIRED_SUCCESS_FIELDS,
+        paired_rows,
+    )
     return destination
+
+
+def _condition_summary_rows(
+    records: Iterable[EpisodeResult],
+) -> list[dict[str, Any]]:
+    episodes = tuple(records)
+    rows: list[dict[str, Any]] = []
+    for condition in _ordered_conditions(episodes):
+        for method in METHODS:
+            grouped = [
+                item
+                for item in episodes
+                if item.perturbation_name == condition and item.method == method
+            ]
+            if not grouped:
+                continue
+            steps = [
+                item.simulation_steps
+                for item in grouped
+                if item.simulation_steps is not None
+            ]
+            runtimes = [item.wall_clock_seconds for item in grouped]
+            rows.append(
+                {
+                    "condition": condition,
+                    "method": method,
+                    "episodes": len(grouped),
+                    "task_success_count": _true_count(
+                        item.task_success for item in grouped
+                    ),
+                    "grasp_success_count": _true_count(
+                        item.grasp_success for item in grouped
+                    ),
+                    "placement_success_count": _true_count(
+                        item.placement_success for item in grouped
+                    ),
+                    "task_success_rate": _optional_rate(
+                        item.task_success for item in grouped
+                    ),
+                    "grasp_success_rate": _optional_rate(
+                        item.grasp_success for item in grouped
+                    ),
+                    "placement_success_rate": _optional_rate(
+                        item.placement_success for item in grouped
+                    ),
+                    "verification_failure_count": (
+                        sum(item.verification_failure_count for item in grouped)
+                        if method in {"vision_closed_loop", "vision_recovery"}
+                        else None
+                    ),
+                    "grasp_verification_failure_count": (
+                        sum(
+                            item.grasp_verification_failure_count
+                            for item in grouped
+                        )
+                        if method in {"vision_closed_loop", "vision_recovery"}
+                        else None
+                    ),
+                    "placement_verification_failure_count": (
+                        sum(
+                            item.placement_verification_failure_count
+                            for item in grouped
+                        )
+                        if method in {"vision_closed_loop", "vision_recovery"}
+                        else None
+                    ),
+                    "recovery_activation_count": (
+                        _true_count(item.recovery_activated for item in grouped)
+                        if method == "vision_recovery"
+                        else None
+                    ),
+                    "recovery_attempt_count": (
+                        sum(item.recovery_attempts or 0 for item in grouped)
+                        if method == "vision_recovery"
+                        else None
+                    ),
+                    "recovery_success_count": (
+                        _true_count(item.recovery_success for item in grouped)
+                        if method == "vision_recovery"
+                        else None
+                    ),
+                    "recovery_failure_count": (
+                        sum(
+                            item.recovery_activated is True
+                            and item.recovery_success is False
+                            for item in grouped
+                        )
+                        if method == "vision_recovery"
+                        else None
+                    ),
+                    "pre_verification_recovery_count": (
+                        sum(
+                            item.recovery_activated is True
+                            and item.recovery_entry_type == "pre_verification"
+                            for item in grouped
+                        )
+                        if method == "vision_recovery"
+                        else None
+                    ),
+                    "post_verification_recovery_count": (
+                        sum(
+                            item.recovery_activated is True
+                            and item.recovery_entry_type == "post_verification"
+                            for item in grouped
+                        )
+                        if method == "vision_recovery"
+                        else None
+                    ),
+                    "mean_simulation_steps": (
+                        fsum(steps) / len(steps) if steps else None
+                    ),
+                    "median_simulation_steps": median(steps) if steps else None,
+                    "std_simulation_steps": pstdev(steps) if steps else None,
+                    "min_simulation_steps": min(steps) if steps else None,
+                    "max_simulation_steps": max(steps) if steps else None,
+                    "mean_runtime_seconds": fsum(runtimes) / len(runtimes),
+                    "total_runtime_seconds": fsum(runtimes),
+                }
+            )
+    return rows
+
+
+def _paired_success_rows(
+    records: Iterable[EpisodeResult],
+) -> list[dict[str, Any]]:
+    episodes = tuple(records)
+    method_prefixes = {
+        "oracle_scripted": "oracle",
+        "vision_open_loop": "vision_open",
+        "vision_closed_loop": "vision_closed",
+        "vision_recovery": "vision_recovery",
+    }
+    by_key: dict[tuple[str | None, int, str], EpisodeResult] = {}
+    for item in episodes:
+        key = (item.perturbation_name, item.seed, item.method)
+        if key in by_key:
+            raise ValueError(
+                "Duplicate condition/seed/method episode records cannot be paired"
+            )
+        by_key[key] = item
+
+    rows: list[dict[str, Any]] = []
+    for condition in _ordered_conditions(episodes):
+        seeds = sorted(
+            {item.seed for item in episodes if item.perturbation_name == condition}
+        )
+        for seed in seeds:
+            row: dict[str, Any] = {"condition": condition, "seed": seed}
+            for method in METHODS:
+                prefix = method_prefixes[method]
+                item = by_key.get((condition, seed, method))
+                for metric in ("task_success", "grasp_success", "placement_success"):
+                    row[f"{prefix}_{metric}"] = (
+                        None if item is None else getattr(item, metric)
+                    )
+            closed = by_key.get((condition, seed, "vision_closed_loop"))
+            row.update(
+                {
+                    "vision_closed_verification_failure": (
+                        None
+                        if closed is None
+                        else closed.verification_failure_count > 0
+                    ),
+                    "vision_closed_verification_failure_count": (
+                        None if closed is None else closed.verification_failure_count
+                    ),
+                    "vision_closed_failure_stage": (
+                        None if closed is None else closed.failure_stage
+                    ),
+                }
+            )
+            recovery = by_key.get((condition, seed, "vision_recovery"))
+            row.update(
+                {
+                    "vision_recovery_verification_failure_occurred": (
+                        None
+                        if recovery is None
+                        else recovery.verification_failure_count > 0
+                    ),
+                    "vision_recovery_verification_failure_count": (
+                        None
+                        if recovery is None
+                        else recovery.verification_failure_count
+                    ),
+                    "vision_recovery_failure_stage": (
+                        None if recovery is None else recovery.failure_stage
+                    ),
+                    "vision_recovery_recovery_activated": (
+                        None if recovery is None else recovery.recovery_activated
+                    ),
+                    "vision_recovery_recovery_entry_type": (
+                        None if recovery is None else recovery.recovery_entry_type
+                    ),
+                    "vision_recovery_recovered": (
+                        None if recovery is None else recovery.recovered
+                    ),
+                    "vision_recovery_recovery_success": (
+                        None if recovery is None else recovery.recovery_success
+                    ),
+                    "vision_recovery_final_success": (
+                        None if recovery is None else recovery.task_success
+                    ),
+                }
+            )
+            rows.append(row)
+    return rows
+
+
+def _ordered_conditions(
+    records: Iterable[EpisodeResult],
+) -> tuple[str | None, ...]:
+    observed = {item.perturbation_name for item in records}
+    ordered: list[str | None] = [
+        name for name in PERTURBATION_NAMES if name in observed
+    ]
+    ordered.extend(sorted(name for name in observed if name not in PERTURBATION_NAMES and name is not None))
+    if None in observed:
+        ordered.append(None)
+    return tuple(ordered)
+
+
+def _true_count(values: Iterable[bool | None]) -> int:
+    return sum(value is True for value in values)
+
+
+def _optional_rate(values: Iterable[bool | None]) -> float | None:
+    available = tuple(value for value in values if value is not None)
+    if not available:
+        return None
+    return _true_count(available) / len(available)
 
 
 def _run_method(
@@ -304,20 +570,37 @@ def _normalize_result(
     elapsed: float,
     perturbation: BenchmarkPerturbation | None = None,
 ) -> EpisodeResult:
+    trace = None
+    initial_execution = None
+    retry_execution = None
+    recovery_entry_type = None
+    initial_execution_failure_code = None
+    initial_execution_failure_stage = None
+    initial_execution_failure_reason = None
+    initial_failure_reason = None
+    recovery_diagnosis = None
+    final_failure_reason = None
+    retry_execution_failure_stage = None
+    retry_execution_failure_reason = None
+    initial_grasp_verification = None
+    initial_placement_verification = None
+    retry_grasp_verification = None
+    retry_placement_verification = None
     if method == "oracle_scripted":
         agent_success = bool(result.success)
         grasp_success = bool(result.pick_success)
         steps = int(result.total_steps)
         observation_count = 0
-        recovery_activated = False
-        recovery_attempts = 0
+        recovery_activated = None
+        recovery_attempts = None
         recovery_success = None
         recovery_stage = None
         recovered = None
         recovery_final_verification = None
         grasp_verification = None
         placement_verification = None
-        verification_failures = 0
+        grasp_verification_failures = 0
+        placement_verification_failures = 0
         source_grounded = None
         target_grounded = None
         source_error = None
@@ -326,24 +609,33 @@ def _normalize_result(
             "grasp" if not result.pick_success else "placement"
         )
         failure_reason = result.failure_reason
+        initial_diagnostics = _oracle_execution_diagnostics(result)
+        retry_diagnostics = _empty_execution_diagnostics()
     else:
         agent_success = bool(result.success)
-        executions = [getattr(result, "execution_result", None)]
+        initial_execution = getattr(result, "execution_result", None)
+        executions = [initial_execution]
         if method == "vision_recovery":
-            executions = [
-                getattr(result, "initial_execution_result", None),
-                getattr(result, "recovery_execution_result", None),
-            ]
+            initial_execution = getattr(result, "initial_execution_result", None)
+            retry_execution = getattr(result, "recovery_execution_result", None)
+            executions = [initial_execution, retry_execution]
+            trace = getattr(result, "recovery_trace", None)
         grasp_success = any(
-            execution is not None and execution.grasp_success
+            execution is not None and getattr(execution, "grasp_success", False)
             for execution in executions
         )
         steps = int(result.total_steps)
         observation_count = int(result.observation_count)
-        recovery_activated = bool(
-            getattr(result, "recovery_activated", False)
+        recovery_activated = (
+            bool(getattr(result, "recovery_activated", False))
+            if method == "vision_recovery"
+            else None
         )
-        recovery_attempts = int(getattr(result, "recovery_attempts", 0))
+        recovery_attempts = (
+            int(getattr(result, "recovery_attempts", 0))
+            if method == "vision_recovery"
+            else None
+        )
         recovery_success = (
             bool(result.success and objective.success)
             if method == "vision_recovery" and recovery_activated
@@ -370,7 +662,80 @@ def _normalize_result(
         placement_verification = _verified(
             getattr(result, "placement_verification", None)
         )
-        verification_failures = _verification_failure_count(method, result)
+        if method == "vision_recovery":
+            recovery_entry_type = getattr(trace, "recovery_entry_type", None)
+            initial_execution_failure_code = getattr(
+                trace,
+                "initial_execution_failure_code",
+                None,
+            )
+            initial_execution_failure_stage = getattr(
+                trace,
+                "initial_execution_failure_stage",
+                None,
+            )
+            initial_failure_reason = getattr(
+                trace,
+                "initial_failure_reason",
+                getattr(result, "initial_failure_reason", None),
+            )
+            recovery_diagnosis = getattr(trace, "diagnosis", None)
+            final_failure_reason = getattr(
+                result,
+                "final_failure_reason",
+                getattr(result, "failure_reason", None),
+            )
+            initial_grasp_verification = _verified(
+                getattr(result, "initial_grasp_verification", None)
+            )
+            initial_placement_verification = _verified(
+                getattr(result, "initial_placement_verification", None)
+            )
+            retry_grasp_verification = _verified(
+                getattr(trace, "recovery_grasp_verification", None)
+            )
+            retry_placement_verification = _verified(
+                getattr(trace, "recovery_placement_verification", None)
+            )
+        else:
+            initial_grasp_verification = grasp_verification
+            initial_placement_verification = placement_verification
+        initial_diagnostics = _execution_diagnostics(initial_execution)
+        retry_diagnostics = _execution_diagnostics(retry_execution)
+        if method == "vision_recovery" and trace is None:
+            initial_execution_failure_code = initial_diagnostics["failure_code"]
+            initial_execution_failure_stage = getattr(
+                initial_execution,
+                "failure_stage",
+                None,
+            )
+        if method == "vision_recovery":
+            initial_execution_failure_reason = getattr(
+                initial_execution,
+                "failure_reason",
+                None,
+            )
+        retry_execution_failure_stage = getattr(
+            retry_execution,
+            "failure_stage",
+            None,
+        )
+        retry_execution_failure_reason = getattr(
+            retry_execution,
+            "failure_reason",
+            None,
+        )
+        if (
+            method == "vision_recovery"
+            and retry_execution is None
+            and getattr(result, "failure_stage", None) == "recovery_execution"
+        ):
+            retry_execution_failure_stage = "recovery_execution"
+            retry_execution_failure_reason = getattr(result, "failure_reason", None)
+        (
+            grasp_verification_failures,
+            placement_verification_failures,
+        ) = _verification_failure_counts(method, result)
         source_detection = getattr(result, "source_detection", None)
         target_detection = getattr(result, "target_detection", None)
         source_grounded = source_detection is not None
@@ -391,6 +756,11 @@ def _normalize_result(
     if not objective.success and failure_stage is None:
         failure_stage = "placement"
         failure_reason = objective.failure_reason
+        if method == "vision_recovery":
+            final_failure_reason = objective.failure_reason
+    verification_failures = (
+        grasp_verification_failures + placement_verification_failures
+    )
     return EpisodeResult(
         **_identity(method, scenario, perturbation),
         agent_success=agent_success,
@@ -404,9 +774,55 @@ def _normalize_result(
         recovery_success=recovery_success,
         recovery_stage=recovery_stage,
         recovered=recovered,
+        recovery_entry_type=recovery_entry_type,
+        initial_execution_failure_code=initial_execution_failure_code,
+        initial_execution_failure_stage=initial_execution_failure_stage,
+        initial_execution_failure_reason=initial_execution_failure_reason,
+        initial_failure_reason=initial_failure_reason,
+        recovery_diagnosis=recovery_diagnosis,
+        final_failure_reason=final_failure_reason,
+        retry_execution_failure_code=retry_diagnostics["failure_code"],
+        retry_execution_failure_stage=retry_execution_failure_stage,
+        retry_execution_failure_reason=retry_execution_failure_reason,
+        initial_failed_reach_failure_code=initial_diagnostics[
+            "failed_reach_failure_code"
+        ],
+        initial_failed_reach_ik_position_residual=initial_diagnostics[
+            "failed_reach_ik_position_residual"
+        ],
+        initial_failed_reach_required_position_tolerance=initial_diagnostics[
+            "failed_reach_required_position_tolerance"
+        ],
+        initial_gripper_termination_reason=initial_diagnostics[
+            "gripper_termination_reason"
+        ],
+        initial_gripper_timeout_diagnostic=initial_diagnostics[
+            "gripper_timeout_diagnostic"
+        ],
+        retry_failed_reach_failure_code=retry_diagnostics[
+            "failed_reach_failure_code"
+        ],
+        retry_failed_reach_ik_position_residual=retry_diagnostics[
+            "failed_reach_ik_position_residual"
+        ],
+        retry_failed_reach_required_position_tolerance=retry_diagnostics[
+            "failed_reach_required_position_tolerance"
+        ],
+        retry_gripper_termination_reason=retry_diagnostics[
+            "gripper_termination_reason"
+        ],
+        retry_gripper_timeout_diagnostic=retry_diagnostics[
+            "gripper_timeout_diagnostic"
+        ],
         recovery_final_verification_result=recovery_final_verification,
         grasp_verification_result=grasp_verification,
         placement_verification_result=placement_verification,
+        initial_grasp_verification_result=initial_grasp_verification,
+        initial_placement_verification_result=initial_placement_verification,
+        retry_grasp_verification_result=retry_grasp_verification,
+        retry_placement_verification_result=retry_placement_verification,
+        grasp_verification_failure_count=grasp_verification_failures,
+        placement_verification_failure_count=placement_verification_failures,
         verification_failure_count=verification_failures,
         source_grounding_success=source_grounded,
         target_grounding_success=target_grounded,
@@ -418,29 +834,134 @@ def _normalize_result(
     )
 
 
-def _verification_failure_count(method: str, result: Any) -> int:
+def _verification_failure_counts(method: str, result: Any) -> tuple[int, int]:
     if method not in {"vision_closed_loop", "vision_recovery"}:
-        return 0
+        return 0, 0
     if method == "vision_closed_loop":
-        values = [result.grasp_verification, result.placement_verification]
+        grasp_values = [getattr(result, "grasp_verification", None)]
+        placement_values = [getattr(result, "placement_verification", None)]
     else:
-        values = [
-            result.initial_grasp_verification,
-            result.initial_placement_verification,
+        grasp_values = [getattr(result, "initial_grasp_verification", None)]
+        placement_values = [
+            getattr(result, "initial_placement_verification", None)
         ]
-        trace = result.recovery_trace
+        trace = getattr(result, "recovery_trace", None)
         if trace is not None:
-            values.extend(
-                [
-                    trace.recovery_grasp_verification,
-                    trace.recovery_placement_verification,
-                ]
+            grasp_values.append(
+                getattr(trace, "recovery_grasp_verification", None)
             )
-    return sum(value is not None and not value.verified for value in values)
+            placement_values.append(
+                getattr(trace, "recovery_placement_verification", None)
+            )
+    return (
+        sum(value is not None and not value.verified for value in grasp_values),
+        sum(value is not None and not value.verified for value in placement_values),
+    )
 
 
 def _verified(value: Any) -> bool | None:
     return None if value is None else bool(value.verified)
+
+
+def _empty_execution_diagnostics() -> dict[str, str | float | None]:
+    return {
+        "failure_code": None,
+        "failed_reach_failure_code": None,
+        "failed_reach_ik_position_residual": None,
+        "failed_reach_required_position_tolerance": None,
+        "gripper_termination_reason": None,
+        "gripper_timeout_diagnostic": None,
+    }
+
+
+def _execution_diagnostics(
+    execution: Any,
+) -> dict[str, str | float | None]:
+    if execution is None:
+        return _empty_execution_diagnostics()
+    return _low_level_execution_diagnostics(
+        getattr(execution, "failed_reach_result", None),
+        getattr(execution, "close_result", None),
+    )
+
+
+def _oracle_execution_diagnostics(
+    result: Any,
+) -> dict[str, str | float | None]:
+    pick = getattr(result, "pick_result", None)
+    reach_candidates = (
+        getattr(pick, "pregrasp_result", None),
+        getattr(pick, "approach_result", None),
+        getattr(pick, "lift_result", None),
+    )
+    failed_reach = next(
+        (
+            candidate
+            for candidate in reach_candidates
+            if candidate is not None and getattr(candidate, "success", None) is False
+        ),
+        None,
+    )
+    gripper_candidates = (
+        getattr(pick, "open_result", None),
+        getattr(pick, "close_result", None),
+        getattr(result, "release_result", None),
+    )
+    gripper = next(
+        (
+            candidate
+            for candidate in gripper_candidates
+            if candidate is not None and getattr(candidate, "success", None) is False
+        ),
+        None,
+    )
+    if gripper is None:
+        gripper = next(
+            (
+                candidate
+                for candidate in (
+                    getattr(pick, "close_result", None),
+                    getattr(result, "release_result", None),
+                    getattr(pick, "open_result", None),
+                )
+                if candidate is not None
+            ),
+            None,
+        )
+    return _low_level_execution_diagnostics(failed_reach, gripper)
+
+
+def _low_level_execution_diagnostics(
+    failed_reach: Any,
+    gripper: Any,
+) -> dict[str, str | float | None]:
+    failed_reach_code = getattr(failed_reach, "failure_code", None)
+    termination_reason = getattr(gripper, "termination_reason", None)
+    timeout_diagnostic = getattr(gripper, "timeout_diagnostic", None)
+    failure_code = failed_reach_code
+    if (
+        failure_code is None
+        and gripper is not None
+        and getattr(gripper, "success", None) is False
+        and termination_reason == "timeout"
+    ):
+        failure_code = timeout_diagnostic
+    return {
+        "failure_code": failure_code,
+        "failed_reach_failure_code": failed_reach_code,
+        "failed_reach_ik_position_residual": getattr(
+            failed_reach,
+            "ik_position_residual",
+            None,
+        ),
+        "failed_reach_required_position_tolerance": getattr(
+            failed_reach,
+            "required_position_tolerance",
+            None,
+        ),
+        "gripper_termination_reason": termination_reason,
+        "gripper_timeout_diagnostic": timeout_diagnostic,
+    }
 
 
 def _recovery_final_verification(result: Any) -> bool | None:
@@ -613,6 +1134,17 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def _write_csv(
+    path: Path,
+    fieldnames: tuple[str, ...],
+    rows: Iterable[Mapping[str, Any]],
+) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _print_report(run: BenchmarkRun) -> None:
