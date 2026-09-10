@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from math import fsum
 from typing import Any, Iterable
 
-BENCHMARK_VERSION = "phase14d-perturb-v2"
+BENCHMARK_VERSION = "phase14d-perturb-v3"
 METHODS = (
     "oracle_scripted",
     "vision_open_loop",
