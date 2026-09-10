@@ -1,4 +1,4 @@
-"""Sequential, reproducible clean and Phase 14B perturbation benchmark runner."""
+"""Run the reproducible manipulation benchmark."""
 
 from __future__ import annotations
 
