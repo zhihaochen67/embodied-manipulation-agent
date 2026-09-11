@@ -45,7 +45,7 @@ Recovery uses the post-failure RGB-D evidence available at entry. A failed verif
 
 ### Bounded recovery demo
 
-https://github.com/user-attachments/assets/e54fc6b1-8a70-4fff-bda9-accd5816f156
+https://github.com/user-attachments/assets/52db9789-acc1-4f68-b8ca-540b184a7fbe
 
 *Seed 56 — +120 mm first-attempt grasp perturbation, structured failure diagnosis, fresh RGB-D re-grounding, nominal replanning, and one bounded retry.*
 
