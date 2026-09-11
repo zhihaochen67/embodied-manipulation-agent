@@ -43,6 +43,12 @@ Recovery uses the post-failure RGB-D evidence available at entry. A failed verif
 
 ## Demo and visual walkthrough
 
+### Bounded recovery demo
+
+https://github.com/user-attachments/assets/e54fc6b1-8a70-4fff-bda9-accd5816f156
+
+*Seed 56 — +120 mm first-attempt grasp perturbation, structured failure diagnosis, fresh RGB-D re-grounding, nominal replanning, and one bounded retry.*
+
 The agent demos require a working graphical display. The primary closed-loop and recovery paths are:
 
 ```bash
